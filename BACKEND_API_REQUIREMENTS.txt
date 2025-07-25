@@ -1,0 +1,152 @@
+==============================
+UNIVERSAL FILE CONVERTER
+BACKEND API REQUIREMENTS
+==============================
+
+This document describes all backend API endpoints required by the Universal File Converter React UI. Each endpoint must provide real data (no dummies) and be fully compatible with the frontend.
+
+------------------------------------------------------------
+1. POST /convert
+------------------------------------------------------------
+Purpose: Upload a file and start the conversion process.
+
+Request:
+  - Method: POST
+  - Content-Type: multipart/form-data
+  - Fields:
+      * file: The file to convert (binary)
+      * sourceFormat: The detected source format (e.g., "PDF")
+      * destinationFormat: The desired output format (e.g., "DOCX")
+
+Response:
+  - Status: 200 OK
+  - Body (JSON):
+      {
+        "jobId": "string" // Unique job identifier for this conversion
+      }
+
+Behavior:
+  - Save the uploaded file.
+  - Start the real conversion process (using libraries like pdf2docx, Pillow, ffmpeg, etc.).
+  - Return a unique jobId for tracking.
+
+------------------------------------------------------------
+2. GET /status/{jobId}
+------------------------------------------------------------
+Purpose: Check the status of a conversion job.
+
+Request:
+  - Method: GET
+  - URL parameter: jobId (string)
+
+Response:
+  - Status: 200 OK
+  - Body (JSON):
+      {
+        "status": "pending" | "converting" | "completed" | "error",
+        "progress": 0-100, // integer, optional
+        "downloadUrl": "/download/{jobId}", // present if completed
+        "error": "string" // present if status is error
+      }
+
+Behavior:
+  - Return the current status of the job.
+  - If completed, provide a downloadUrl.
+  - If error, provide an error message.
+
+------------------------------------------------------------
+3. GET /download/{jobId}
+------------------------------------------------------------
+Purpose: Download the converted file.
+
+Request:
+  - Method: GET
+  - URL parameter: jobId (string)
+
+Response:
+  - Status: 200 OK
+  - Body: File download (with correct Content-Disposition and MIME type headers)
+
+Behavior:
+  - Serve the converted file as an attachment.
+  - Return 404 if the job or file does not exist.
+
+------------------------------------------------------------
+4. GET /formats
+------------------------------------------------------------
+Purpose: List all supported conversion formats.
+
+Request:
+  - Method: GET
+
+Response:
+  - Status: 200 OK
+  - Body (JSON):
+      [
+        {
+          "source": "PDF",
+          "destination": ["DOCX", "DOC", ...]
+        },
+        {
+          "source": "DOCX",
+          "destination": ["PDF", "HTML", ...]
+        }
+        // ...etc
+      ]
+
+Behavior:
+  - Return the full list of supported source/destination format pairs.
+  - This must match the structure and content used in your frontend.
+
+------------------------------------------------------------
+5. Error Handling (for all endpoints)
+------------------------------------------------------------
+- Return clear error messages and appropriate HTTP status codes.
+- Example error response:
+    {
+      "status": "error",
+      "error": "File type not supported"
+    }
+
+------------------------------------------------------------
+6. CORS
+------------------------------------------------------------
+- Enable CORS for your frontend domain (or '*' for development).
+
+------------------------------------------------------------
+REAL DATA REQUIREMENTS
+------------------------------------------------------------
+- Conversion must be real: Use appropriate libraries to actually convert files.
+- Job tracking: Each conversion must have a unique jobId. Store job status and file paths so /status and /download work reliably.
+- File storage: Store uploaded and converted files in a secure, temporary location. Clean up old files after a set period.
+
+------------------------------------------------------------
+EXAMPLE API USAGE FLOW
+------------------------------------------------------------
+1. User uploads file and selects formats.
+   - UI calls POST /convert with file and formats.
+   - Backend returns { "jobId": "abc123" }.
+
+2. UI polls GET /status/abc123 until status is "completed".
+   - When done, UI gets downloadUrl.
+
+3. User clicks download.
+   - UI calls GET /download/abc123.
+   - Backend returns the real converted file.
+
+4. UI fetches supported formats on load.
+   - UI calls GET /formats.
+   - Backend returns the full formats array.
+
+------------------------------------------------------------
+SUMMARY TABLE
+------------------------------------------------------------
+| Endpoint              | Method | Request Data                | Response Data/Type         | Real Data Requirement                |
+|-----------------------|--------|-----------------------------|----------------------------|--------------------------------------|
+| /convert              | POST   | file, sourceFormat, destinationFormat | { jobId }                | Actually convert file, return jobId  |
+| /status/{jobId}       | GET    | jobId (URL param)           | { status, progress, downloadUrl, error } | Track real job status                |
+| /download/{jobId}     | GET    | jobId (URL param)           | File download              | Serve real converted file            |
+| /formats              | GET    | None                        | Array of formats           | Return real supported formats        |
+
+------------------------------------------------------------
+If you implement these endpoints with real conversion logic, your UI will work perfectly and users will get real converted files. 
