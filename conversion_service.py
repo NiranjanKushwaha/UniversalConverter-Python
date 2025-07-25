@@ -26,8 +26,8 @@ from PIL import Image, ImageDraw, ImageFont
 import cv2
 import numpy as np
 from cairosvg import svg2png, svg2pdf
-from svglib.svglib import renderSVG
-from reportlab.graphics import renderPDF
+from svglib.svglib import svg2rlg
+from reportlab.graphics import renderPDF, renderPM
 
 # Audio/Video processing (optional - commented out to avoid import errors)
 # from pydub import AudioSegment
