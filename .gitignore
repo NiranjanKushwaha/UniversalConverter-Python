@@ -64,6 +64,9 @@ simple_test.py
 test_conversions.py
 test_deduplication.py
 test_deduplication_curl.sh
+test_files/
+test_outputs/
+summaryReport.pdf
 
 # Temporary files
 ~$*
