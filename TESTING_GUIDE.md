@@ -38,6 +38,12 @@ Run the following command:
 python automated_test_suite.py
 ```
 
+Generate the PDF summary
+
+```bash
+python generate_summary_pdf.py
+```
+
 ---
 
 ## 4. **View the Test Results**

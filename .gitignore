@@ -66,7 +66,7 @@ test_deduplication.py
 test_deduplication_curl.sh
 test_files/
 test_outputs/
-summaryReport.pdf
+# summaryReport.pdf
 
 # Temporary files
 ~$*
