@@ -573,13 +573,14 @@ class ConversionService:
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             jobs[job_id]["progress"] = 60
-            
             if result.returncode == 0:
                 base_name = os.path.splitext(os.path.basename(input_path))[0]
                 generated_pdf = os.path.join(os.path.dirname(output_path), base_name + ".pdf")
                 if os.path.abspath(generated_pdf) != os.path.abspath(output_path):
                     shutil.move(generated_pdf, output_path)
                 jobs[job_id]["progress"] = 100
+                jobs[job_id]["conversion_method"] = "libreoffice"
+                jobs[job_id]["warning"] = None
                 logger.info("DOCX to PDF: LibreOffice conversion successful")
                 return True
             else:
@@ -594,6 +595,8 @@ class ConversionService:
             from docx2pdf import convert
             convert(input_path, output_path)
             jobs[job_id]["progress"] = 100
+            jobs[job_id]["conversion_method"] = "docx2pdf"
+            jobs[job_id]["warning"] = None
             logger.info("DOCX to PDF: docx2pdf conversion successful")
             return True
         except Exception as e:
@@ -605,6 +608,8 @@ class ConversionService:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 jobs[job_id]["progress"] = 100
+                jobs[job_id]["conversion_method"] = "unoconv"
+                jobs[job_id]["warning"] = None
                 logger.info("DOCX to PDF: unoconv conversion successful")
                 return True
             else:
@@ -620,6 +625,8 @@ class ConversionService:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 jobs[job_id]["progress"] = 100
+                jobs[job_id]["conversion_method"] = "pandoc"
+                jobs[job_id]["warning"] = None
                 logger.info("DOCX to PDF: pandoc conversion successful")
                 return True
             else:
@@ -649,6 +656,8 @@ class ConversionService:
             pdf_doc = SimpleDocTemplate(output_path, pagesize=A4)
             styles = getSampleStyleSheet()
             story = []
+            missing_images = 0
+            missing_tables = 0
 
             # Helper to iterate block items in order
             def iter_block_items(parent):
@@ -697,7 +706,11 @@ class ConversionService:
                                     story.append(img)
                                     story.append(Spacer(1, 12))
                                     os.unlink(temp_img_path)
+                                else:
+                                    missing_images += 1
+                                    logger.warning("Image found in DOCX but could not be extracted.")
                             except Exception as e:
+                                missing_images += 1
                                 logger.warning(f"Error processing inline image: {e}")
                 elif isinstance(block, DocxTable):
                     try:
@@ -725,23 +738,34 @@ class ConversionService:
                             pdf_table.setStyle(style)
                             story.append(pdf_table)
                             story.append(Spacer(1, 12))
+                        else:
+                            missing_tables += 1
+                            logger.warning("Table found in DOCX but could not be extracted.")
                     except Exception as e:
+                        missing_tables += 1
                         logger.warning(f"Error processing table: {e}")
 
             if story:
                 pdf_doc.build(story)
                 jobs[job_id]["progress"] = 100
+                jobs[job_id]["conversion_method"] = "python-docx-fallback"
                 jobs[job_id]["warning"] = "Fallback method used: layout may not be perfect. For best results, ensure LibreOffice is installed and working."
+                if missing_images > 0 or missing_tables > 0:
+                    jobs[job_id]["warning"] += f" Missing images: {missing_images}, missing tables: {missing_tables}."
                 logger.info("DOCX to PDF: Enhanced python-docx + reportlab (block order) conversion successful")
                 return True
             else:
                 logger.error("No valid content found for conversion")
                 jobs[job_id]["error"] = "No valid content found for conversion"
+                jobs[job_id]["conversion_method"] = "python-docx-fallback"
+                jobs[job_id]["warning"] = "No valid content found for conversion."
                 return False
                 
         except Exception as e:
             logger.error(f"All DOCX to PDF methods failed: {e}")
             jobs[job_id]["error"] = f"DOCX to PDF conversion failed: {e}"
+            jobs[job_id]["conversion_method"] = "python-docx-fallback"
+            jobs[job_id]["warning"] = f"DOCX to PDF conversion failed: {e}"
             return False
     
     def _docx_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:

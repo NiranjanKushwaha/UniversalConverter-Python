@@ -377,7 +377,9 @@ def get_status(jobId: str):
         "status": job["status"],
         "progress": job["progress"],
         "downloadUrl": f"/download/{jobId}" if job["status"] == "completed" else None,
-        "error": job["error"]
+        "error": job["error"],
+        "conversion_method": job.get("conversion_method"),
+        "warning": job.get("warning")
     }
     return resp
 
