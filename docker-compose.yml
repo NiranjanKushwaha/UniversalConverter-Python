@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  universal-converter:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./converted:/app/converted
+    environment:
+      - UPLOAD_DIR=/app/uploads
+      - CONVERTED_DIR=/app/converted
+      - MAX_FILE_SIZE=104857600
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Add Redis for job queue (for production)
+  # redis:
+  #   image: redis:alpine
+  #   ports:
+  #     - "6379:6379"
+  #   restart: unless-stopped
+
+  # Optional: Add PostgreSQL for persistent storage
+  # postgres:
+  #   image: postgres:13
+  #   environment:
+  #     POSTGRES_DB: converter
+  #     POSTGRES_USER: converter_user
+  #     POSTGRES_PASSWORD: converter_password
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   restart: unless-stopped
+
+# volumes:
+#   postgres_data: 

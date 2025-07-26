@@ -5,8 +5,14 @@ from uuid import uuid4
 import os
 import asyncio
 import aiofiles
+import shutil
+import uuid
+import hashlib
 from typing import List, Dict
 from conversion_service import ConversionService
+import logging
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 app = FastAPI(title="Universal File Converter API", version="1.0.0")
 
@@ -24,6 +30,9 @@ conversion_service = ConversionService()
 
 # In-memory job store (replace with persistent storage in production)
 jobs = {}
+
+# File hash mapping to avoid storing duplicate files
+file_hash_mapping = {}  # hash -> {filename, upload_path}
 
 # Example supported formats (expand as needed)
 supported_formats = [
@@ -158,6 +167,39 @@ CONVERTED_DIR = "converted"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CONVERTED_DIR, exist_ok=True)
 
+async def calculate_file_hash(content: bytes) -> str:
+    """Calculate SHA-256 hash of file content"""
+    return hashlib.sha256(content).hexdigest()
+
+async def get_or_create_file_path(content: bytes, original_filename: str) -> tuple[str, str]:
+    """
+    Check if file already exists by hash, return existing path or create new one.
+    Returns: (upload_path, file_hash)
+    """
+    file_hash = await calculate_file_hash(content)
+    
+    # Check if we already have this file
+    if file_hash in file_hash_mapping:
+        existing_info = file_hash_mapping[file_hash]
+        return existing_info["upload_path"], file_hash
+    
+    # Create new file entry
+    file_extension = os.path.splitext(original_filename)[1] if original_filename else ""
+    upload_filename = f"{file_hash}{file_extension}"
+    upload_path = os.path.join(UPLOAD_DIR, upload_filename)
+    
+    # Save the file
+    async with aiofiles.open(upload_path, 'wb') as f:
+        await f.write(content)
+    
+    # Store mapping
+    file_hash_mapping[file_hash] = {
+        "filename": upload_filename,
+        "upload_path": upload_path
+    }
+    
+    return upload_path, file_hash
+
 async def perform_conversion(job_id: str, upload_path: str, output_path: str, source_format: str, destination_format: str):
     """Background task to perform file conversion"""
     try:
@@ -172,6 +214,67 @@ async def perform_conversion(job_id: str, upload_path: str, output_path: str, so
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
+
+async def is_file_in_use(file_hash: str, current_job_id: str) -> bool:
+    """Check if a file is still being used by other jobs"""
+    for job_id, job in jobs.items():
+        if job_id != current_job_id and job.get("file_hash") == file_hash:
+            return True
+    return False
+
+async def cleanup_unused_files():
+    """Remove files that are no longer referenced by any jobs"""
+    files_to_remove = []
+    
+    for file_hash, file_info in file_hash_mapping.items():
+        is_used = False
+        for job in jobs.values():
+            if job.get("file_hash") == file_hash:
+                is_used = True
+                break
+        
+        if not is_used:
+            files_to_remove.append(file_hash)
+    
+    # Remove unused files
+    for file_hash in files_to_remove:
+        file_info = file_hash_mapping[file_hash]
+        try:
+            if os.path.exists(file_info["upload_path"]):
+                os.remove(file_info["upload_path"])
+            del file_hash_mapping[file_hash]
+        except Exception as e:
+            print(f"Error removing file {file_info['upload_path']}: {e}")
+
+def cleanup_temp_files(directory: str):
+    """Clean up temporary files (files starting with ~$)"""
+    try:
+        for filename in os.listdir(directory):
+            if filename.startswith('~$'):
+                temp_file_path = os.path.join(directory, filename)
+                if os.path.isfile(temp_file_path):
+                    os.remove(temp_file_path)
+                    logging.info(f"Cleaned up temporary file: {filename}")
+    except Exception as e:
+        logging.error(f"Error cleaning up temporary files: {e}")
+
+# Initialize scheduler for periodic cleanup
+scheduler = AsyncIOScheduler()
+
+@scheduler.scheduled_job(CronTrigger(minute=0))  # Run every hour
+async def scheduled_cleanup():
+    """Scheduled cleanup of temporary files and unused files"""
+    try:
+        logging.info("Running scheduled cleanup...")
+        await cleanup_unused_files()
+        cleanup_temp_files(CONVERTED_DIR)
+        cleanup_temp_files(UPLOAD_DIR)
+        logging.info("Scheduled cleanup completed")
+    except Exception as e:
+        logging.error(f"Error in scheduled cleanup: {e}")
+
+# Start the scheduler
+scheduler.start()
 
 @app.post("/convert")
 async def convert_file(
@@ -207,9 +310,16 @@ async def convert_file(
         
         # Generate job ID and file paths
         job_id = str(uuid4())
-        file_extension = os.path.splitext(file.filename)[1] if file.filename else ""
-        upload_filename = f"{job_id}_input{file_extension}"
-        upload_path = os.path.join(UPLOAD_DIR, upload_filename)
+        
+        # Read file content and get its hash
+        file_content = await file.read()
+        upload_path, file_hash = await get_or_create_file_path(file_content, file.filename)
+        
+        # Log whether file was reused or created new
+        if file_hash in file_hash_mapping and any(job.get("file_hash") == file_hash for job in jobs.values()):
+            print(f"Reusing existing file with hash {file_hash[:8]}... for job {job_id}")
+        else:
+            print(f"Created new file with hash {file_hash[:8]}... for job {job_id}")
         
         # Determine output file extension
         output_extension = f".{destination_format.lower()}"
@@ -225,11 +335,6 @@ async def convert_file(
         output_filename = f"{job_id}_output{output_extension}"
         output_path = os.path.join(CONVERTED_DIR, output_filename)
         
-        # Save uploaded file
-        async with aiofiles.open(upload_path, 'wb') as f:
-            content = await file.read()
-            await f.write(content)
-        
         # Initialize job status
         jobs[job_id] = {
             "status": "pending",
@@ -239,7 +344,8 @@ async def convert_file(
             "error": None,
             "source_format": source_format,
             "destination_format": destination_format,
-            "original_filename": file.filename
+            "original_filename": file.filename,
+            "file_hash": file_hash
         }
         
         # Start background conversion task
@@ -251,6 +357,9 @@ async def convert_file(
             source_format,
             destination_format
         )
+        
+        # Clean up any temporary files
+        background_tasks.add_task(cleanup_temp_files, CONVERTED_DIR)
         
         return {"jobId": job_id}
         
@@ -333,25 +442,25 @@ def root():
 
 @app.delete("/jobs/{jobId}")
 def delete_job(jobId: str):
-    """Delete a job and clean up associated files"""
+    """Delete a job and cleanup associated files"""
     job = jobs.get(jobId)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    # Clean up files
-    try:
-        if job.get("upload_path") and os.path.exists(job["upload_path"]):
-            os.remove(job["upload_path"])
-        if job.get("converted_path") and os.path.exists(job["converted_path"]):
+    # Remove converted file if it exists
+    if job.get("converted_path") and os.path.exists(job["converted_path"]):
+        try:
             os.remove(job["converted_path"])
-    except Exception as e:
-        # Log error but don't fail the deletion
-        print(f"Error cleaning up files for job {jobId}: {e}")
+        except Exception as e:
+            print(f"Error removing converted file: {e}")
     
-    # Remove job from memory
+    # Remove job from tracking
     del jobs[jobId]
     
-    return {"message": f"Job {jobId} deleted successfully"}
+    # Clean up unused files
+    asyncio.create_task(cleanup_unused_files())
+    
+    return {"message": "Job deleted successfully"}
 
 @app.get("/jobs")
 def list_jobs():
@@ -368,3 +477,31 @@ def list_jobs():
             "error": job_data.get("error")
         })
     return {"jobs": job_list}
+
+@app.get("/cleanup")
+async def trigger_cleanup(background_tasks: BackgroundTasks):
+    """Manually trigger cleanup of unused files and temporary files"""
+    try:
+        background_tasks.add_task(cleanup_unused_files)
+        background_tasks.add_task(cleanup_temp_files, CONVERTED_DIR)
+        background_tasks.add_task(cleanup_temp_files, UPLOAD_DIR)
+        return {"message": "Cleanup initiated"}
+    except Exception as e:
+        logging.error(f"Error in cleanup endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/storage/stats")
+def get_storage_stats():
+    """Get storage statistics"""
+    upload_files = len([f for f in os.listdir(UPLOAD_DIR) if os.path.isfile(os.path.join(UPLOAD_DIR, f))])
+    converted_files = len([f for f in os.listdir(CONVERTED_DIR) if os.path.isfile(os.path.join(CONVERTED_DIR, f))])
+    active_jobs = len(jobs)
+    unique_files = len(file_hash_mapping)
+    
+    return {
+        "upload_files": upload_files,
+        "converted_files": converted_files,
+        "active_jobs": active_jobs,
+        "unique_files": unique_files,
+        "file_hash_mapping_size": len(file_hash_mapping)
+    }

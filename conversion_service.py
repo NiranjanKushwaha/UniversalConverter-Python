@@ -105,6 +105,7 @@ class ConversionService:
             ("PDF", "PNG"): self._pdf_to_image,
             ("PDF", "XLSX"): self._pdf_to_xlsx,
             ("PDF", "CSV"): self._pdf_to_csv,
+            ("PDF", "XLS"): self._pdf_to_xls,
             
             # DOCX conversions
             ("DOCX", "PDF"): self._docx_to_pdf,
@@ -136,24 +137,51 @@ class ConversionService:
             ("JPG", "GIF"): self._image_convert,
             ("JPG", "TIFF"): self._image_convert,
             ("JPG", "WEBP"): self._image_convert,
+            ("JPG", "ICO"): self._image_convert,
+            ("JPG", "DOCX"): self._image_to_docx,
+            ("JPG", "DOC"): self._image_to_doc,
+            ("JPG", "XLSX"): self._image_to_xlsx,
+            ("JPG", "PPTX"): self._image_to_pptx,
+            ("JPG", "TXT"): self._image_to_txt,
             ("PNG", "JPG"): self._image_convert,
             ("PNG", "PDF"): self._image_to_pdf,
             ("PNG", "BMP"): self._image_convert,
             ("PNG", "GIF"): self._image_convert,
             ("PNG", "TIFF"): self._image_convert,
             ("PNG", "WEBP"): self._image_convert,
+            ("PNG", "ICO"): self._image_convert,
+            ("PNG", "DOCX"): self._image_to_docx,
+            ("PNG", "DOC"): self._image_to_doc,
+            ("PNG", "XLSX"): self._image_to_xlsx,
+            ("PNG", "PPTX"): self._image_to_pptx,
+            ("PNG", "TXT"): self._image_to_txt,
             ("BMP", "JPG"): self._image_convert,
             ("BMP", "PNG"): self._image_convert,
             ("BMP", "PDF"): self._image_to_pdf,
+            ("BMP", "ICO"): self._image_convert,
+            ("BMP", "DOCX"): self._image_to_docx,
+            ("BMP", "DOC"): self._image_to_doc,
+            ("BMP", "TXT"): self._image_to_txt,
             ("GIF", "JPG"): self._image_convert,
             ("GIF", "PNG"): self._image_convert,
             ("GIF", "PDF"): self._image_to_pdf,
+            ("GIF", "ICO"): self._image_convert,
+            ("GIF", "DOCX"): self._image_to_docx,
+            ("GIF", "DOC"): self._image_to_doc,
             ("TIFF", "JPG"): self._image_convert,
             ("TIFF", "PNG"): self._image_convert,
             ("TIFF", "PDF"): self._image_to_pdf,
+            ("TIFF", "ICO"): self._image_convert,
+            ("TIFF", "DOCX"): self._image_to_docx,
+            ("TIFF", "DOC"): self._image_to_doc,
+            ("TIFF", "TXT"): self._image_to_txt,
             ("WEBP", "JPG"): self._image_convert,
             ("WEBP", "PNG"): self._image_convert,
             ("WEBP", "PDF"): self._image_to_pdf,
+            ("WEBP", "ICO"): self._image_convert,
+            ("WEBP", "DOCX"): self._image_to_docx,
+            ("WEBP", "DOC"): self._image_to_doc,
+            ("WEBP", "TXT"): self._image_to_txt,
             
             # SVG conversions
             ("SVG", "PNG"): self._svg_to_image,
@@ -353,6 +381,28 @@ class ConversionService:
             return True
         except Exception as e:
             logger.error(f"PDF to CSV conversion error: {e}")
+            return False
+    
+    def _pdf_to_xls(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            reader = PdfReader(input_path)
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            
+            row = 1
+            for page_num, page in enumerate(reader.pages):
+                jobs[job_id]["progress"] = 20 + (page_num / len(reader.pages)) * 60
+                text = page.extract_text()
+                lines = text.split('\n')
+                for line in lines:
+                    if line.strip():
+                        ws.cell(row=row, column=1, value=line.strip())
+                        row += 1
+            
+            wb.save(output_path)
+            return True
+        except Exception as e:
+            logger.error(f"PDF to XLS conversion error: {e}")
             return False
     
     # DOCX Conversion Methods
@@ -635,6 +685,71 @@ class ConversionService:
             return True
         except Exception as e:
             logger.error(f"Image to PDF conversion error: {e}")
+            return False
+    
+    def _image_to_docx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Convert image to HTML first, then to DOCX
+            temp_html = output_path.replace(os.path.splitext(output_path)[1], '.html')
+            if self._image_to_html(input_path, temp_html, job_id, jobs):
+                result = self._html_to_docx(temp_html, output_path, job_id, jobs)
+                os.remove(temp_html)
+                return result
+            return False
+        except Exception as e:
+            logger.error(f"Image to DOCX conversion error: {e}")
+            return False
+    
+    def _image_to_doc(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Convert image to HTML first, then to DOC
+            temp_html = output_path.replace(os.path.splitext(output_path)[1], '.html')
+            if self._image_to_html(input_path, temp_html, job_id, jobs):
+                result = self._html_to_doc(temp_html, output_path, job_id, jobs)
+                os.remove(temp_html)
+                return result
+            return False
+        except Exception as e:
+            logger.error(f"Image to DOC conversion error: {e}")
+            return False
+    
+    def _image_to_xlsx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Convert image to HTML first, then to XLSX
+            temp_html = output_path.replace(os.path.splitext(output_path)[1], '.html')
+            if self._image_to_html(input_path, temp_html, job_id, jobs):
+                result = self._html_to_xlsx(temp_html, output_path, job_id, jobs)
+                os.remove(temp_html)
+                return result
+            return False
+        except Exception as e:
+            logger.error(f"Image to XLSX conversion error: {e}")
+            return False
+    
+    def _image_to_pptx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Convert image to HTML first, then to PPTX
+            temp_html = output_path.replace(os.path.splitext(output_path)[1], '.html')
+            if self._image_to_html(input_path, temp_html, job_id, jobs):
+                result = self._html_to_pptx(temp_html, output_path, job_id, jobs)
+                os.remove(temp_html)
+                return result
+            return False
+        except Exception as e:
+            logger.error(f"Image to PPTX conversion error: {e}")
+            return False
+    
+    def _image_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Convert image to HTML first, then to TXT
+            temp_html = output_path.replace(os.path.splitext(output_path)[1], '.html')
+            if self._image_to_html(input_path, temp_html, job_id, jobs):
+                result = self._html_to_txt(temp_html, output_path, job_id, jobs)
+                os.remove(temp_html)
+                return result
+            return False
+        except Exception as e:
+            logger.error(f"Image to TXT conversion error: {e}")
             return False
     
     # SVG Conversion Methods
@@ -1221,4 +1336,130 @@ class ConversionService:
             return False
         except Exception as e:
             logger.error(f"Video to audio conversion error: {e}")
+            return False
+
+    # Helper methods for image conversions
+    def _image_to_html(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(f'''<!DOCTYPE html>
+<html>
+<head>
+    <title>Image Conversion</title>
+    <style>
+        body {{ margin: 20px; font-family: Arial, sans-serif; }}
+        .image-container {{ text-align: center; }}
+        img {{ max-width: 100%; height: auto; }}
+    </style>
+</head>
+<body>
+    <div class="image-container">
+        <img src="data:image/png;base64,{self._image_to_base64(input_path)}" alt="Converted Image">
+    </div>
+</body>
+</html>''')
+            return True
+        except Exception as e:
+            logger.error(f"Image to HTML conversion error: {e}")
+            return False
+    
+    def _image_to_base64(self, image_path: str) -> str:
+        """Convert image to base64 string"""
+        try:
+            with open(image_path, "rb") as image_file:
+                import base64
+                return base64.b64encode(image_file.read()).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Image to base64 conversion error: {e}")
+            return ""
+    
+    def _html_to_doc(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Convert HTML to DOCX first, then save as DOC
+            temp_docx = output_path.replace('.doc', '.docx')
+            if self._html_to_docx(input_path, temp_docx, job_id, jobs):
+                # For DOC format, we'll just rename the DOCX file
+                # In a real implementation, you'd need a proper DOC converter
+                shutil.copy2(temp_docx, output_path)
+                os.remove(temp_docx)
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"HTML to DOC conversion error: {e}")
+            return False
+    
+    def _html_to_xlsx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Convert HTML to CSV first, then to XLSX
+            temp_csv = output_path.replace('.xlsx', '.csv')
+            if self._html_to_csv(input_path, temp_csv, job_id, jobs):
+                result = self._csv_to_xlsx(temp_csv, output_path, job_id, jobs)
+                os.remove(temp_csv)
+                return result
+            return False
+        except Exception as e:
+            logger.error(f"HTML to XLSX conversion error: {e}")
+            return False
+    
+    def _html_to_pptx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Convert HTML to PDF first, then to PPTX
+            temp_pdf = output_path.replace('.pptx', '.pdf')
+            if self._html_to_pdf(input_path, temp_pdf, job_id, jobs):
+                result = self._pdf_to_pptx(temp_pdf, output_path, job_id, jobs)
+                os.remove(temp_pdf)
+                return result
+            return False
+        except Exception as e:
+            logger.error(f"HTML to PPTX conversion error: {e}")
+            return False
+    
+    def _html_to_csv(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            with open(input_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Extract text from HTML
+            soup = BeautifulSoup(content, 'html.parser')
+            text = soup.get_text()
+            
+            # Write as CSV
+            with open(output_path, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                for line in text.split('\n'):
+                    if line.strip():
+                        writer.writerow([line.strip()])
+            
+            return True
+        except Exception as e:
+            logger.error(f"HTML to CSV conversion error: {e}")
+            return False
+    
+    def _pdf_to_pptx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Convert PDF to images first, then to PPTX
+            temp_dir = os.path.dirname(output_path)
+            temp_images = []
+            
+            reader = PdfReader(input_path)
+            for i, page in enumerate(reader.pages):
+                jobs[job_id]["progress"] = 20 + (i / len(reader.pages)) * 60
+                
+                # Convert page to image
+                temp_image = os.path.join(temp_dir, f"page_{i}.png")
+                page_image = page.to_image()
+                page_image.save(temp_image)
+                temp_images.append(temp_image)
+            
+            # Create PPTX with images
+            prs = Presentation()
+            for temp_image in temp_images:
+                slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
+                slide.shapes.add_picture(temp_image, 0, 0, prs.slide_width, prs.slide_height)
+                os.remove(temp_image)
+            
+            prs.save(output_path)
+            return True
+        except Exception as e:
+            logger.error(f"PDF to PPTX conversion error: {e}")
             return False
