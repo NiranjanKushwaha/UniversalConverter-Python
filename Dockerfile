@@ -12,6 +12,15 @@ RUN apt-get update && apt-get install -y \
     poppler-utils \
     ffmpeg \
     wkhtmltopdf \
+    libreoffice \
+    unoconv \
+    pandoc \
+    antiword \
+    catdoc \
+    imagemagick \
+    ghostscript \
+    sox \
+    libsox-fmt-all \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
