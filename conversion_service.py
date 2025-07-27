@@ -363,9 +363,9 @@ class ConversionService:
                                     run = p.add_run(text)
                                     run.font.size = Pt(span['size'])
                                     run.font.name = span['font']
-                                    if 'bold' in span['flags']:
+                                    if span['flags'] & fitz.TEXT_FONT_B: # Check for bold flag
                                         run.bold = True
-                                    if 'italic' in span['flags']:
+                                    if span['flags'] & fitz.TEXT_FONT_I: # Check for italic flag
                                         run.italic = True
                                     p.alignment = WD_ALIGN_PARAGRAPH.LEFT
                     elif block['type'] == 1:  # Image block
@@ -488,6 +488,23 @@ class ConversionService:
         jobs[job_id]["warning"] = "DOC to DOCX conversion is not fully supported. Saving as DOCX with a .doc extension. For true .doc conversion, external tools like LibreOffice are recommended."
         return self._pdf_to_docx(input_path, output_path, job_id, jobs)
     
+    def _pdf_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """PDF to TXT conversion."""
+        try:
+            reader = PdfReader(input_path)
+            text_content = ""
+            
+            for page_num, page in enumerate(reader.pages):
+                jobs[job_id]["progress"] = 20 + (page_num / len(reader.pages)) * 60
+                text_content += page.extract_text() + "\n"
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(text_content)
+            return True
+        except Exception as e:
+            logger.error(f"PDF to TXT conversion error: {e}")
+            jobs[job_id]["error"] = f"PDF to TXT conversion failed: {e}"
+            return False
     
     def _pdf_to_html(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
@@ -1202,7 +1219,9 @@ class ConversionService:
         import shutil
         import os
         
+        
         jobs[job_id]["progress"] = 10
+        
         
         # Method 1: LibreOffice (soffice) - Best quality, handles complex DOC files
         try:
@@ -1217,6 +1236,7 @@ class ConversionService:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             jobs[job_id]["progress"] = 60
             
+            
             if result.returncode == 0:
                 base_name = os.path.splitext(os.path.basename(input_path))[0]
                 generated_pdf = os.path.join(os.path.dirname(output_path), base_name + ".pdf")
@@ -1230,7 +1250,170 @@ class ConversionService:
         except Exception as e:
             logger.warning(f"LibreOffice not available or failed: {e}")
     
-    # DOC Conversion Methods (similar to DOCX but with limited support)
+        # Method 2: unoconv (LibreOffice wrapper)
+        try:
+            cmd = ['unoconv', '-f', 'pdf', '-o', output_path, input_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                jobs[job_id]["progress"] = 100
+                logger.info("DOC to PDF: unoconv conversion successful")
+                return True
+            else:
+                logger.warning(f"unoconv failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"unoconv not available or failed: {e}")
+        # Method 3: pandoc (if available)
+        try:
+            cmd = ['pandoc', input_path, '-o', output_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                jobs[job_id]["progress"] = 100
+                logger.info("DOC to PDF: pandoc conversion successful")
+                return True
+            else:
+                logger.warning(f"pandoc failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"pandoc not available or failed: {e}")
+        # Method 4: antiword (Linux/Unix only)
+        try:
+            cmd = ['antiword', input_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode == 0:
+                # Convert text to PDF
+                from reportlab.pdfgen import canvas
+                from reportlab.lib.pagesizes import letter
+                
+                c = canvas.Canvas(output_path, pagesize=letter)
+                width, height = letter
+                
+                lines = result.stdout.split('\n')
+                y = height - 50
+                
+                for line in lines[:100]:  # Limit to first 100 lines
+                    if y < 50:
+                        c.showPage()
+                        y = height - 50
+                    
+                    if len(line) > 80:
+                        line = line[:80] + "..."
+                    
+                    c.drawString(50, y, line)
+                    y -= 15
+                
+                c.save()
+                jobs[job_id]["progress"] = 100
+                logger.info("DOC to PDF: antiword conversion successful")
+                return True
+            else:
+                logger.warning(f"antiword failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"antiword not available or failed: {e}")
+        # Method 5: catdoc (Linux/Unix only)
+        try:
+            cmd = ['catdoc', input_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode == 0:
+                # Convert text to PDF
+                from reportlab.pdfgen import canvas
+                from reportlab.lib.pagesizes import letter
+                
+                c = canvas.Canvas(output_path, pagesize=letter)
+                width, height = letter
+                
+                lines = result.stdout.split('\n')
+                y = height - 50
+                
+                for line in lines[:100]:  # Limit to first 100 lines
+                    if y < 50:
+                        c.showPage()
+                        y = height - 50
+                    
+                    if len(line) > 80:
+                        line = line[:80] + "..."
+                    
+                    c.drawString(50, y, line)
+                    y -= 15
+                
+                c.save()
+                jobs[job_id]["progress"] = 100
+                logger.info("DOC to PDF: catdoc conversion successful")
+                return True
+            else:
+                logger.warning(f"catdoc failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"catdoc not available or failed: {e}")
+        # Method 6: Basic text extraction (last resort)
+        try:
+            with open(input_path, 'rb') as f:
+                content = f.read()
+            
+            
+            # Very basic text extraction (this is limited)
+            # Attempt to decode as UTF-8, falling back to a more lenient encoding if needed
+            text_content = content.decode('utf-8', errors='ignore')
+            
+            try:
+            # Remove non-printable characters
+                import re
+                text_content = re.sub(r'[^\x20-\x7E\n\r\t]', '', text_content)
+            
+                if text_content.strip():
+                    from reportlab.pdfgen import canvas
+                    from reportlab.lib.pagesizes import letter
+                    
+                    c = canvas.Canvas(output_path, pagesize=letter)
+                    width, height = letter
+                    
+                    lines = text_content.split('\n')
+                    y = height - 50
+                    
+                    for line in lines[:50]:  # Limit to first 50 lines
+                        if y < 50:
+                            c.showPage()
+                            y = height - 50
+                        
+                        if len(line) > 80:
+                            line = line[:80] + "..."
+                        
+                        c.drawString(50, y, line)
+                        y -= 20
+                    
+                    c.save()
+                    jobs[job_id]["progress"] = 100
+                    logger.info("DOC to PDF: Basic text extraction successful")
+                    return True
+                else:
+                    logger.error("No readable text found in DOC file")
+                    return False
+                    
+            except UnicodeDecodeError:
+                logger.error("No readable text found in DOC file")
+                return False
+                
+        except Exception as e:
+            logger.error(f"All DOC to PDF methods failed: {e}")
+            jobs[job_id]["error"] = f"DOC to PDF conversion failed: {e}"
+            return False
+    
+    def _doc_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """DOC to TXT conversion (basic text extraction)."""
+        try:
+            with open(input_path, 'rb') as f:
+                content = f.read()
+            
+            text_content = content.decode('utf-8', errors='ignore')
+            text_content = content.decode('latin-1', errors='ignore') # Fallback
+            
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(text_content)
+            logger.info("DOC to TXT conversion completed with basic text extraction.")
+            jobs[job_id]["warning"] = "DOC to TXT conversion used basic text extraction. Formatting may be lost. For better results, ensure LibreOffice is installed and in your PATH."
+            return True
+        except Exception as e:
+            logger.error(f"DOC to TXT conversion error: {e}")
+            jobs[job_id]["error"] = f"DOC to TXT conversion failed: {e}"
+            return False
     
     def _doc_to_html(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:

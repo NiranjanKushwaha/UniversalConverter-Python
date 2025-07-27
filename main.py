@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends, status
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from uuid import uuid4
@@ -13,6 +13,9 @@ from conversion_service import ConversionService
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from fastapi_limiter import FastAPILimiter
+from redis.asyncio import Redis
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,6 +32,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup():
+    redis_host = os.getenv("REDIS_HOST", "localhost")
+    redis_port = int(os.getenv("REDIS_PORT", 6379))
+    redis_password = os.getenv("REDIS_PASSWORD", None)
+    
+    try:
+        redis_instance = Redis(host=redis_host, port=redis_port, password=redis_password, db=0)
+        await FastAPILimiter.init(redis_instance)
+        logger.info(f"FastAPILimiter initialized with Redis at {redis_host}:{redis_port}")
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis for rate limiting: {e}. Rate limiting will be disabled.")
+        # Optionally, you can set a flag here to disable rate limiting functionality
+        # or use a dummy limiter if Redis is not critical for app startup.
+        # For now, we'll let the app start but rate limiting won't function.
 
 # Initialize conversion service
 conversion_service = ConversionService()
@@ -47,13 +66,13 @@ MAX_FILE_SIZE_MB = 100 # Maximum file size allowed for upload in MB
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # Dependency for API Key authentication
-async def get_api_key(api_key: str = Depends(lambda x: x.headers.get("X-API-Key"))):
+async def get_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
     if API_KEY is None:
         logger.warning("API_KEY environment variable is not set. API key authentication is disabled.")
         return True # Allow access if API_KEY is not set (for development convenience)
     
-    if api_key is None or api_key != API_KEY:
-        logger.warning(f"Unauthorized access attempt with API Key: {api_key}")
+    if x_api_key is None or x_api_key != API_KEY:
+        logger.warning(f"Unauthorized access attempt with API Key: {x_api_key}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API Key"
@@ -513,103 +532,6 @@ def delete_job(jobId: str):
     logger.info(f"Job {jobId} deleted successfully.")
     return {"message": "Job deleted successfully"}
 
-@app.get("/status/{jobId}")
-def get_status(jobId: str):
-    job = jobs.get(jobId)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    resp = {
-        "status": job["status"],
-        "progress": job["progress"],
-        "downloadUrl": f"/download/{jobId}" if job["status"] == "completed" else None,
-        "error": job["error"],
-        "conversion_method": job.get("conversion_method"),
-        "warning": job.get("warning")
-    }
-    return resp
-
-@app.get("/download/{jobId}")
-def download_file(jobId: str):
-    job = jobs.get(jobId)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    if job["status"] != "completed":
-        raise HTTPException(status_code=400, detail="File conversion not completed yet")
-    
-    if not job["converted_path"] or not os.path.exists(job["converted_path"]):
-        raise HTTPException(status_code=404, detail="Converted file not found")
-    
-    # Generate a meaningful filename for download
-    original_name = job.get("original_filename", "converted_file")
-    name_without_ext = os.path.splitext(original_name)[0]
-    destination_format = job.get("destination_format", "").lower()
-    
-    if destination_format == "jpg":
-        download_filename = f"{name_without_ext}.jpg"
-    elif destination_format == "docx":
-        download_filename = f"{name_without_ext}.docx"
-    elif destination_format == "xlsx":
-        download_filename = f"{name_without_ext}.xlsx"
-    elif destination_format == "pptx":
-        download_filename = f"{name_without_ext}.pptx"
-    else:
-        download_filename = f"{name_without_ext}.{destination_format}"
-    
-    return FileResponse(
-        job["converted_path"], 
-        filename=download_filename,
-        media_type='application/octet-stream'
-    )
-
-@app.get("/formats")
-def get_formats():
-    """Get all supported conversion formats"""
-    return supported_formats
-
-@app.get("/health")
-def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "message": "Universal File Converter API is running"}
-
-@app.get("/")
-def root():
-    """Root endpoint with API information"""
-    return {
-        "message": "Universal File Converter API",
-        "version": "1.0.0",
-        "endpoints": {
-            "convert": "POST /convert - Convert a file",
-            "status": "GET /status/{jobId} - Check conversion status",
-            "download": "GET /download/{jobId} - Download converted file",
-            "formats": "GET /formats - Get supported formats",
-            "health": "GET /health - Health check"
-        }
-    }
-
-@app.delete("/jobs/{jobId}", dependencies=[Depends(get_api_key)])
-def delete_job(jobId: str):
-    """Delete a job and cleanup associated files"""
-    job = jobs.get(jobId)
-    if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
-    
-    # Remove converted file if it exists
-    if job.get("converted_path") and os.path.exists(job["converted_path"]):
-        try:
-            os.remove(job["converted_path"])
-            logger.info(f"Removed converted file for job {jobId}: {job['converted_path']}")
-        except Exception as e:
-            logger.error(f"Error removing converted file for job {jobId}: {e}")
-    
-    # Remove job from tracking
-    del jobs[jobId]
-    
-    # Clean up unused files (asynchronously)
-    asyncio.create_task(cleanup_unused_files())
-    
-    logger.info(f"Job {jobId} deleted successfully.")
-    return {"message": "Job deleted successfully"}
 
 @app.get("/jobs", dependencies=[Depends(get_api_key)])
 def list_jobs():
