@@ -11,7 +11,9 @@ import re
 # Document processing
 from PyPDF2 import PdfReader, PdfWriter
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_SECTION_START
 import openpyxl
 import xlrd
 import pandas as pd
@@ -23,6 +25,8 @@ from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 import json
 import csv
+import fitz # PyMuPDF
+import pdfplumber # For table extraction from PDF
 
 # Image processing
 from PIL import Image, ImageDraw, ImageFont
@@ -281,25 +285,215 @@ class ConversionService:
     
     # PDF Conversion Methods
     def _pdf_to_docx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Robust PDF to DOCX conversion with multiple fallbacks for cross-platform support."""
+        import subprocess
+        import shutil
+        import os
+        import tempfile
+        
+        jobs[job_id]["progress"] = 10
+        
+        # Method 1: LibreOffice (soffice) - Best quality, preserves formatting, images, and tables
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            cmd = [
+                'soffice',
+                '--headless',
+                '--convert-to', 'docx',
+                '--outdir', os.path.dirname(output_path),
+                input_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            jobs[job_id]["progress"] = 60
+            
+            if result.returncode == 0:
+                base_name = os.path.splitext(os.path.basename(input_path))[0]
+                generated_docx = os.path.join(os.path.dirname(output_path), base_name + ".docx")
+                if os.path.exists(generated_docx):
+                    if os.path.abspath(generated_docx) != os.path.abspath(output_path):
+                        shutil.move(generated_docx, output_path)
+                    jobs[job_id]["progress"] = 100
+                    jobs[job_id]["conversion_method"] = "libreoffice"
+                    jobs[job_id]["warning"] = None
+                    logger.info("PDF to DOCX: LibreOffice conversion successful")
+                    return True
+                else:
+                    logger.warning("LibreOffice did not generate expected DOCX file")
+            else:
+                logger.warning(f"LibreOffice failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"LibreOffice not available or failed: {e}")
+            jobs[job_id]["error"] = f"LibreOffice not available or failed: {e}"
+
+        # Method 2: PyMuPDF + pdfplumber (Python-based, good fallback)
+        try:
+            doc = Document()
+            pdf_doc = fitz.open(input_path)
+            
+            doc.add_paragraph("--- PDF to DOCX Conversion (Python Fallback) ---")
+            doc.add_paragraph("Note: This is a fallback conversion due to issues with LibreOffice or other external tools.")
+            doc.add_paragraph("This conversion attempts to preserve text, images, and tables using PyMuPDF and pdfplumber. Layout fidelity may vary.")
+            doc.add_paragraph("-------------------------------------\n")
+
+            for page_num, page in enumerate(pdf_doc):
+                jobs[job_id]["progress"] = 20 + (page_num / len(pdf_doc)) * 60
+                
+                if page_num > 0:
+                    doc.add_section(WD_SECTION_START.NEW_PAGE)
+                
+                doc.add_heading(f"Page {page_num + 1}", level=2)
+                
+                text_blocks = page.get_text("dict")["blocks"]
+                images = page.get_images(full=True)
+                
+                with pdfplumber.open(input_path) as pl_pdf:
+                    pl_page = pl_pdf.pages[page_num]
+                    tables = pl_page.extract_tables()
+
+                sorted_blocks = sorted(text_blocks, key=lambda b: b['bbox'][1])
+
+                for block in sorted_blocks:
+                    if block['type'] == 0:  # Text block
+                        for line in block['lines']:
+                            for span in line['spans']:
+                                text = span['text'].strip()
+                                if text:
+                                    p = doc.add_paragraph()
+                                    run = p.add_run(text)
+                                    run.font.size = Pt(span['size'])
+                                    run.font.name = span['font']
+                                    if 'bold' in span['flags']:
+                                        run.bold = True
+                                    if 'italic' in span['flags']:
+                                        run.italic = True
+                                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    elif block['type'] == 1:  # Image block
+                        pass # Handled below with explicit image extraction
+
+                for img_index, img_info in enumerate(images):
+                    xref = img_info[0]
+                    base_image = pdf_doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image_ext = base_image["ext"]
+                    
+                    if image_bytes:
+                        try:
+                            temp_image_path = os.path.join(tempfile.gettempdir(), f"temp_image_{job_id}_{page_num}_{img_index}.{image_ext}")
+                            with open(temp_image_path, "wb") as f:
+                                f.write(image_bytes)
+                            
+                            self._add_image_to_docx(doc, temp_image_path)
+                            os.remove(temp_image_path)
+                        except Exception as img_e:
+                            logger.warning(f"Could not add image from PDF to DOCX (fallback): {img_e}")
+                            doc.add_paragraph(f"[Image placeholder: Failed to embed image {img_index+1}]")
+                
+                for table_num, table_data in enumerate(tables):
+                    if table_data:
+                        try:
+                            docx_table = doc.add_table(rows=len(table_data), cols=len(table_data[0]))
+                            docx_table.style = 'Table Grid'
+                            
+                            for r_idx, row_data in enumerate(table_data):
+                                for c_idx, cell_text in enumerate(row_data):
+                                    docx_table.cell(r_idx, c_idx).text = cell_text if cell_text is not None else ""
+                            doc.add_paragraph("\n")
+                        except Exception as table_e:
+                            logger.warning(f"Could not add table from PDF to DOCX (fallback): {table_e}")
+                            doc.add_paragraph(f"[Table placeholder: Failed to embed table {table_num+1}]")
+                    
+            pdf_doc.close()
+            doc.save(output_path)
+            logger.info("PDF to DOCX conversion completed with PyMuPDF/pdfplumber fallback.")
+            jobs[job_id]["warning"] = "PDF to DOCX conversion used Python-based fallback. Layout fidelity may vary. For best results, ensure LibreOffice is installed and in your PATH."
+            return True
+        except ImportError as ie:
+            logger.error(f"Missing dependency for PDF to DOCX Python fallback: {ie}. Falling back to basic text extraction.")
+            jobs[job_id]["error"] = f"Missing dependency for PDF to DOCX Python fallback: {ie}. Please install PyMuPDF (fitz) and pdfplumber."
+            # Fallback to basic text extraction if PyMuPDF or pdfplumber are not installed
+            return self._pdf_to_docx_basic_fallback(input_path, output_path, job_id, jobs)
+        except Exception as e:
+            logger.error(f"PDF to DOCX Python fallback conversion error: {e}. Falling back to basic text extraction.")
+            jobs[job_id]["error"] = f"PDF to DOCX Python fallback conversion failed: {e}. Attempting basic text extraction."
+            # Fallback to basic text extraction for other errors
+            return self._pdf_to_docx_basic_fallback(input_path, output_path, job_id, jobs)
+
+    def _pdf_to_docx_basic_fallback(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Basic PDF to DOCX conversion (text only) as a fallback."""
         try:
             reader = PdfReader(input_path)
             doc = Document()
             
+            doc.add_paragraph("--- PDF to DOCX Conversion (Basic Fallback) ---")
+            doc.add_paragraph("Note: This is a fallback conversion due to issues with advanced methods or missing dependencies.")
+            doc.add_paragraph("Only text content is extracted. Images, tables, and complex formatting are not preserved.")
+            doc.add_paragraph("-------------------------------------\n")
+
             for page_num, page in enumerate(reader.pages):
                 jobs[job_id]["progress"] = 20 + (page_num / len(reader.pages)) * 60
+                
+                doc.add_heading(f"Page {page_num + 1}", level=2)
+                
                 text = page.extract_text()
-                doc.add_paragraph(text)
+                if text:
+                    for line in text.split('\n'):
+                        if line.strip():
+                            doc.add_paragraph(line.strip())
+                else:
+                    doc.add_paragraph("[No readable text on this page]")
+                
                 if page_num < len(reader.pages) - 1:
                     doc.add_page_break()
             
             doc.save(output_path)
+            logger.info("PDF to DOCX basic fallback conversion completed.")
+            jobs[job_id]["warning"] = "PDF to DOCX conversion used basic text extraction fallback. Images, tables, and complex formatting were not preserved."
             return True
         except Exception as e:
-            logger.error(f"PDF to DOCX conversion error: {e}")
+            logger.error(f"PDF to DOCX basic fallback conversion error: {e}")
+            jobs[job_id]["error"] = f"PDF to DOCX conversion failed even with basic fallback: {e}"
             return False
+
+    def _add_image_to_docx(self, doc, image_path):
+        """Helper to add an image to a DOCX document, scaling it to fit."""
+        try:
+            # Open image to get its dimensions
+            pil_img = Image.open(image_path)
+            img_width, img_height = pil_img.size
+            
+            # Define maximum width for images in DOCX (e.g., 6 inches)
+            max_width_inches = 6.0
+            max_height_inches = 8.0 # Max height to prevent very tall images
+            
+            # Calculate scaling factor
+            scale_factor_width = max_width_inches / (img_width / 96) # Assuming 96 DPI for image
+            scale_factor_height = max_height_inches / (img_height / 96)
+            
+            # Use the smaller scale factor to ensure image fits within both width and height constraints
+            scale_factor = min(scale_factor_width, scale_factor_height)
+            
+            # Add image to document with calculated dimensions
+            doc.add_picture(image_path, width=Inches(img_width / 96 * scale_factor), height=Inches(img_height / 96 * scale_factor))
+        except Exception as e:
+            logger.error(f"Error adding image to DOCX: {e}")
+            raise # Re-raise to be caught by the main conversion method
     
     def _pdf_to_doc(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         # Convert to DOCX first, then save as DOC (limited support)
+        # Note: Saving as .doc directly from python-docx is not supported.
+        # This will effectively save a .docx file with a .doc extension.
+        # For true .doc conversion, external tools like LibreOffice would be needed.
+        logger.warning("DOC to DOCX conversion is not fully supported. Saving as DOCX with a .doc extension.")
+        jobs[job_id]["warning"] = "DOC to DOCX conversion is not fully supported. Saving as DOCX with a .doc extension. For true .doc conversion, external tools like LibreOffice are recommended."
+        return self._pdf_to_docx(input_path, output_path, job_id, jobs)
+    
+    def _pdf_to_doc(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        # Convert to DOCX first, then save as DOC (limited support)
+        # Note: Saving as .doc directly from python-docx is not supported.
+        # This will effectively save a .docx file with a .doc extension.
+        # For true .doc conversion, external tools like LibreOffice would be needed.
+        logger.warning("DOC to DOCX conversion is not fully supported. Saving as DOCX with a .doc extension.")
+        jobs[job_id]["warning"] = "DOC to DOCX conversion is not fully supported. Saving as DOCX with a .doc extension. For true .doc conversion, external tools like LibreOffice are recommended."
         return self._pdf_to_docx(input_path, output_path, job_id, jobs)
     
     def _pdf_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -579,76 +773,73 @@ class ConversionService:
 
     def _pdf_to_xml(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
-            import pypandoc
-            pypandoc.convert_file(input_path, 'xml', outputfile=output_path)
+            # Direct PDF to XML conversion with full fidelity is complex and often requires OCR or specialized tools.
+            # This method extracts text and creates a simple XML structure.
+            reader = PdfReader(input_path)
+            root = ET.Element("document")
+            
+            for i, page in enumerate(reader.pages):
+                jobs[job_id]["progress"] = 20 + (i / len(reader.pages)) * 60
+                page_element = ET.SubElement(root, "page", number=str(i+1))
+                text = page.extract_text()
+                text_element = ET.SubElement(page_element, "text")
+                text_element.text = text
+            
+            tree = ET.ElementTree(root)
+            tree.write(output_path, encoding='utf-8', xml_declaration=True)
+            logger.info("PDF to XML conversion completed with text extraction. Full fidelity requires specialized tools.")
+            jobs[job_id]["warning"] = "PDF to XML conversion is limited to text extraction. For full fidelity, consider specialized PDF parsing libraries or OCR tools."
             return True
         except Exception as e:
             logger.error(f"PDF to XML conversion error: {e}")
-            # Fallback to extracting text and creating a simple XML
-            try:
-                reader = PdfReader(input_path)
-                root = ET.Element("document")
-                
-                for i, page in enumerate(reader.pages):
-                    page_element = ET.SubElement(root, "page", number=str(i+1))
-                    text = page.extract_text()
-                    text_element = ET.SubElement(page_element, "text")
-                    text_element.text = text
-                
-                tree = ET.ElementTree(root)
-                tree.write(output_path, encoding='utf-8', xml_declaration=True)
-                return True
-            except Exception as fallback_e:
-                logger.error(f"PDF to XML fallback conversion error: {fallback_e}")
-                return False
+            jobs[job_id]["error"] = f"PDF to XML conversion failed: {e}"
+            return False
 
     def _pdf_to_epub(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
+            import tempfile
             import pypandoc
-            pypandoc.convert_file(input_path, 'epub', outputfile=output_path)
-            return True
-        except Exception as e:
-            logger.error(f"PDF to EPUB conversion error: {e}")
-            # Fallback to creating a placeholder EPUB
-            try:
-                # Create a basic EPUB with extracted text
-                reader = PdfReader(input_path)
-                text_content = ""
-                for page in reader.pages:
-                    text_content += page.extract_text() + "\n\n"
-                
-                # Create a placeholder HTML file
-                temp_html_path = output_path.replace('.epub', '.html')
+            
+            # Direct PDF to EPUB conversion with full fidelity is complex.
+            # This method extracts text and converts it to a basic EPUB via HTML.
+            reader = PdfReader(input_path)
+            text_content = ""
+            for page_num, page in enumerate(reader.pages):
+                jobs[job_id]["progress"] = 20 + (page_num / len(reader.pages)) * 60
+                text_content += page.extract_text() + "\n\n"
+            
+            # Create a temporary HTML file from extracted text
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_html_path = os.path.join(temp_dir, "temp_pdf_to_epub.html")
                 with open(temp_html_path, 'w', encoding='utf-8') as f:
                     f.write(f"<html><body><pre>{text_content}</pre></body></html>")
                 
-                # Convert HTML to EPUB
-                import pypandoc
+                # Convert HTML to EPUB using pypandoc
                 pypandoc.convert_file(temp_html_path, 'epub', outputfile=output_path)
-                os.remove(temp_html_path)
-                return True
-            except Exception as fallback_e:
-                logger.error(f"PDF to EPUB fallback conversion error: {fallback_e}")
-                return False
+                # No need to os.remove(temp_html_path) here, TemporaryDirectory handles cleanup
+            
+            logger.info("PDF to EPUB conversion completed via text extraction to HTML. Full fidelity requires specialized tools.")
+            jobs[job_id]["warning"] = "PDF to EPUB conversion is limited to text extraction. For full fidelity, consider specialized PDF parsing libraries."
+            return True
+        except Exception as e:
+            logger.error(f"PDF to EPUB conversion error: {e}")
+            jobs[job_id]["error"] = f"PDF to EPUB conversion failed: {e}"
+            return False
 
     def _pdf_to_mobi(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
-            import pypandoc
-            pypandoc.convert_file(input_path, 'mobi', outputfile=output_path)
-            return True
+            # PDF to MOBI is best done via EPUB, which then requires ebook-convert (Calibre).
+            # This method first converts PDF to EPUB (text-only), then EPUB to MOBI.
+            temp_epub_path = output_path.replace('.mobi', '.epub')
+            if self._pdf_to_epub(input_path, temp_epub_path, job_id, jobs):
+                result = self._epub_to_mobi(temp_epub_path, output_path, job_id, jobs)
+                os.remove(temp_epub_path)
+                return result
+            return False
         except Exception as e:
             logger.error(f"PDF to MOBI conversion error: {e}")
-            # Fallback: convert to EPUB first, then to MOBI
-            try:
-                temp_epub_path = output_path.replace('.mobi', '.epub')
-                if self._pdf_to_epub(input_path, temp_epub_path, job_id, jobs):
-                    result = self._epub_to_mobi(temp_epub_path, output_path, job_id, jobs)
-                    os.remove(temp_epub_path)
-                    return result
-                return False
-            except Exception as fallback_e:
-                logger.error(f"PDF to MOBI fallback conversion error: {fallback_e}")
-                return False
+            jobs[job_id]["error"] = f"PDF to MOBI conversion failed: {e}"
+            return False
     
     # DOCX Conversion Methods
     def _docx_to_pdf(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -801,7 +992,24 @@ class ConversionService:
                                     with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_img:
                                         temp_img.write(image_part.blob)
                                         temp_img_path = temp_img.name
-                                    img = RLImage(temp_img_path, width=4*inch, height=3*inch, kind='proportional')
+                                    
+                                    # Use PIL to get image dimensions and scale
+                                    pil_img = Image.open(temp_img_path)
+                                    img_width, img_height = pil_img.size
+                                    
+                                    # Calculate aspect ratio and scale to fit within page width
+                                    aspect_ratio = img_height / img_width
+                                    max_width = 6 * inch  # Max width for image
+                                    max_height = 8 * inch # Max height for image
+                                    
+                                    if img_width > max_width:
+                                        img_width = max_width
+                                        img_height = img_width * aspect_ratio
+                                    if img_height > max_height:
+                                        img_height = max_height
+                                        img_width = img_height / aspect_ratio
+                                        
+                                    img = RLImage(temp_img_path, width=img_width, height=img_height)
                                     story.append(img)
                                     story.append(Spacer(1, 12))
                                     os.unlink(temp_img_path)
@@ -823,18 +1031,31 @@ class ConversionService:
                         if table_data:
                             pdf_table = Table(table_data)
                             style = TableStyle([
-                                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#D3D3D3')), # Light grey header
+                                ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
                                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                                ('FONTSIZE', (0, 0), (-1, 0), 12),
-                                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-                                ('GRID', (0, 0), (-1, -1), 1, colors.black),
-                                ('FONTSIZE', (0, 1), (-1, -1), 10),
-                                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                                ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+                                ('TOPPADDING', (0, 0), (-1, 0), 6),
+                                ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+                                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                                ('LEFTPADDING', (0,0), (-1,-1), 3),
+                                ('RIGHTPADDING', (0,0), (-1,-1), 3),
                             ])
                             pdf_table.setStyle(style)
+                            
+                            # Calculate column widths to fit content, or use a fixed width
+                            col_widths = [None] * len(table_data[0]) if table_data else []
+                            if col_widths:
+                                # Simple heuristic: distribute width evenly
+                                total_width = A4[0] - 2 * inch # Page width minus margins
+                                col_width = total_width / len(col_widths)
+                                col_widths = [col_width] * len(col_widths)
+                                pdf_table._argW = col_widths
+
                             story.append(pdf_table)
                             story.append(Spacer(1, 12))
                         else:
@@ -962,23 +1183,75 @@ class ConversionService:
             return False
 
     def _docx_to_mobi(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Robust DOCX to MOBI conversion with multiple fallbacks."""
+        import pypandoc
+        import shutil
+        import os
+        
+        jobs[job_id]["progress"] = 10
+        
+        # Method 1: pypandoc - Primary method
         try:
-            import pypandoc
             pypandoc.convert_file(input_path, 'mobi', outputfile=output_path)
+            jobs[job_id]["progress"] = 100
+            logger.info("DOCX to MOBI: pypandoc conversion successful")
             return True
         except Exception as e:
-            logger.error(f"DOCX to MOBI conversion error: {e}")
-            # Fallback: convert to EPUB first, then to MOBI
-            try:
-                temp_epub_path = output_path.replace('.mobi', '.epub')
-                if self._docx_to_epub(input_path, temp_epub_path, job_id, jobs):
-                    result = self._epub_to_mobi(temp_epub_path, output_path, job_id, jobs)
-                    os.remove(temp_epub_path)
-                    return result
+            logger.warning(f"pypandoc DOCX to MOBI conversion failed: {e}. Attempting fallback.")
+            jobs[job_id]["error"] = f"pypandoc DOCX to MOBI conversion failed: {e}"
+
+        # Method 2: Convert to EPUB first, then to MOBI (requires ebook-convert)
+        try:
+            temp_epub_path = output_path.replace('.mobi', '.epub')
+            logger.info(f"Attempting DOCX to EPUB conversion for MOBI fallback: {input_path} -> {temp_epub_path}")
+            if self._docx_to_epub(input_path, temp_epub_path, job_id, jobs):
+                logger.info(f"DOCX to EPUB successful. Now converting EPUB to MOBI: {temp_epub_path} -> {output_path}")
+                result = self._epub_to_mobi(temp_epub_path, output_path, job_id, jobs)
+                os.remove(temp_epub_path)
+                return result
+            else:
+                logger.warning("DOCX to EPUB conversion failed, cannot proceed with MOBI fallback.")
+                jobs[job_id]["error"] = "DOCX to EPUB conversion failed for MOBI fallback."
                 return False
-            except Exception as fallback_e:
-                logger.error(f"DOCX to MOBI fallback conversion error: {fallback_e}")
-                return False
+        except Exception as fallback_e:
+            logger.error(f"DOCX to MOBI fallback (via EPUB) conversion error: {fallback_e}")
+            jobs[job_id]["error"] = f"DOCX to MOBI conversion failed: {fallback_e}"
+            return False
+    
+    # DOC Conversion Methods (similar to DOCX but with limited support)
+    def _doc_to_pdf(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Robust DOC to PDF conversion with multiple fallbacks for cross-platform support."""
+        import subprocess
+        import shutil
+        import os
+        
+        jobs[job_id]["progress"] = 10
+        
+        # Method 1: LibreOffice (soffice) - Best quality, handles complex DOC files
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            cmd = [
+                'soffice',
+                '--headless',
+                '--convert-to', 'pdf',
+                '--outdir', os.path.dirname(output_path),
+                input_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            jobs[job_id]["progress"] = 60
+            
+            if result.returncode == 0:
+                base_name = os.path.splitext(os.path.basename(input_path))[0]
+                generated_pdf = os.path.join(os.path.dirname(output_path), base_name + ".pdf")
+                if os.path.abspath(generated_pdf) != os.path.abspath(output_path):
+                    shutil.move(generated_pdf, output_path)
+                jobs[job_id]["progress"] = 100
+                logger.info("DOC to PDF: LibreOffice conversion successful")
+                return True
+            else:
+                logger.warning(f"LibreOffice failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"LibreOffice not available or failed: {e}")
     
     # DOC Conversion Methods (similar to DOCX but with limited support)
     def _doc_to_pdf(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -1415,20 +1688,64 @@ class ConversionService:
                 return False
 
     def _xlsx_to_ods(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Robust XLSX to ODS conversion with multiple fallbacks for cross-platform support."""
+        import subprocess
+        import shutil
+        import os
+        
+        jobs[job_id]["progress"] = 10
+        
+        # Method 1: LibreOffice (soffice) - Best quality, preserves formatting
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            cmd = [
+                'soffice',
+                '--headless',
+                '--convert-to', 'ods',
+                '--outdir', os.path.dirname(output_path),
+                input_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            jobs[job_id]["progress"] = 60
+            
+            if result.returncode == 0:
+                base_name = os.path.splitext(os.path.basename(input_path))[0]
+                generated_ods = os.path.join(os.path.dirname(output_path), base_name + ".ods")
+                if os.path.exists(generated_ods):
+                    if os.path.abspath(generated_ods) != os.path.abspath(output_path):
+                        shutil.move(generated_ods, output_path)
+                    jobs[job_id]["progress"] = 100
+                    logger.info("XLSX to ODS: LibreOffice conversion successful")
+                    return True
+                else:
+                    logger.warning("LibreOffice did not generate expected ODS file")
+            else:
+                logger.warning(f"LibreOffice failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"LibreOffice not available or failed: {e}")
+
+        # Method 2: pandoc (if available) - less reliable for direct office format conversion
         try:
             import pypandoc
             pypandoc.convert_file(input_path, 'ods', outputfile=output_path)
+            jobs[job_id]["progress"] = 100
+            logger.info("XLSX to ODS: pypandoc conversion successful")
             return True
         except Exception as e:
-            logger.error(f"XLSX to ODS conversion error: {e}")
-            # Fallback to creating a placeholder file
-            try:
-                with open(output_path, 'w') as f:
-                    f.write("Conversion from XLSX to ODS failed. This placeholder file was created.")
-                return True
-            except Exception as fallback_e:
-                logger.error(f"XLSX to ODS fallback error: {fallback_e}")
-                return False
+            logger.warning(f"XLSX to ODS pypandoc fallback failed: {e}")
+
+        # Method 3: Fallback to creating a placeholder file
+        try:
+            with open(output_path, 'w') as f:
+                f.write("Conversion from XLSX to ODS failed. This placeholder file was created. For best results, ensure LibreOffice is installed and in your PATH.")
+            jobs[job_id]["progress"] = 100
+            logger.warning("XLSX to ODS: Created placeholder file.")
+            jobs[job_id]["error"] = "XLSX to ODS conversion failed. Ensure LibreOffice is installed and in your PATH."
+            return True
+        except Exception as fallback_e:
+            logger.error(f"XLSX to ODS final fallback error: {fallback_e}")
+            jobs[job_id]["error"] = f"XLSX to ODS conversion failed: {fallback_e}"
+            return False
 
     def _xlsx_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
@@ -3101,70 +3418,103 @@ class ConversionService:
             return False
 
     def _epub_to_mobi(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Robust EPUB to MOBI conversion with multiple fallbacks."""
+        import pypandoc
+        import subprocess
+        import shutil
+        import os
+        
+        jobs[job_id]["progress"] = 10
+        
+        # Method 1: pypandoc - Primary method
         try:
-            import pypandoc
             pypandoc.convert_file(input_path, 'mobi', outputfile=output_path)
+            jobs[job_id]["progress"] = 100
+            logger.info("EPUB to MOBI: pypandoc conversion successful")
             return True
         except Exception as e:
-            logger.error(f"EPUB to MOBI conversion error: {e}")
-            # Fallback to ebook-convert (calibre)
+            logger.warning(f"pypandoc EPUB to MOBI conversion failed: {e}. Attempting fallback to ebook-convert.")
+            jobs[job_id]["error"] = f"pypandoc EPUB to MOBI conversion failed: {e}"
+
+            # Method 2: ebook-convert (Calibre CLI tool) - Best quality fallback
             try:
-                import subprocess
-                cmd = ['ebook-convert', input_path, output_path]
+                # Check if ebook-convert is available
+                ebook_convert_path = shutil.which("ebook-convert")
+                if ebook_convert_path is None:
+                    error_msg = "ebook-convert (Calibre) not found in PATH. Please install Calibre (https://calibre-ebook.com/download) to enable EPUB to MOBI conversion."
+                    logger.error(error_msg)
+                    jobs[job_id]["error"] = error_msg
+                    jobs[job_id]["warning"] = error_msg
+                    return False
+
+                cmd = [ebook_convert_path, input_path, output_path]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                jobs[job_id]["progress"] = 100
+                
                 if result.returncode == 0:
+                    logger.info("EPUB to MOBI: ebook-convert successful")
+                    jobs[job_id]["warning"] = None
                     return True
                 else:
-                    logger.error(f"ebook-convert failed: {result.stderr}")
-                    raise RuntimeError("ebook-convert failed")
+                    error_msg = f"ebook-convert failed: {result.stderr}"
+                    logger.error(error_msg)
+                    jobs[job_id]["error"] = error_msg
+                    jobs[job_id]["warning"] = error_msg
+                    return False
             except Exception as fallback_e:
-                logger.error(f"ebook-convert fallback error: {fallback_e}")
+                error_msg = f"EPUB to MOBI fallback (ebook-convert) conversion error: {fallback_e}"
+                logger.error(error_msg)
+                jobs[job_id]["error"] = error_msg
+                jobs[job_id]["warning"] = error_msg
                 # Final fallback: create a placeholder
                 try:
                     with open(output_path, 'w') as f:
-                        f.write("Conversion to MOBI failed because required dependencies (like Calibre) are not installed.")
+                        f.write("Conversion to MOBI failed. This placeholder file was created. Ensure Calibre is installed and in your PATH.")
+                    jobs[job_id]["warning"] = "Conversion to MOBI failed. This placeholder file was created. Ensure Calibre is installed and in your PATH."
                     return True
                 except Exception as placeholder_e:
                     logger.error(f"MOBI placeholder creation failed: {placeholder_e}")
+                    jobs[job_id]["error"] = f"MOBI placeholder creation failed: {placeholder_e}"
                     return False
     
     def _pdf_to_pptx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
             import fitz  # PyMuPDF
+            import tempfile
+            
             # Convert PDF to images first, then to PPTX
-            temp_dir = "converted"
-            os.makedirs(temp_dir, exist_ok=True)
-            temp_images = []
-            
-            doc = fitz.open(input_path)
-            for i, page in enumerate(doc):
-                jobs[job_id]["progress"] = 20 + (i / len(doc)) * 60
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_images = []
                 
-                # Convert page to image
-                temp_image_path = os.path.join(temp_dir, f"page_{i}.png")
-                pix = page.get_pixmap()
-                pix.save(temp_image_path)
-                temp_images.append(temp_image_path)
-            
-            # Create PPTX with images
-            prs = Presentation()
-            # Set slide size based on PDF page size if possible
-            if len(doc) > 0:
-                first_page = doc[0]
-                page_width, page_height = first_page.rect.width, first_page.rect.height
-                prs.slide_width = int(page_width * 12700) # Convert points to EMUs
-                prs.slide_height = int(page_height * 12700)
+                doc = fitz.open(input_path)
+                for i, page in enumerate(doc):
+                    jobs[job_id]["progress"] = 20 + (i / len(doc)) * 60
+                    
+                    # Convert page to image
+                    temp_image_path = os.path.join(temp_dir, f"page_{i}.png")
+                    pix = page.get_pixmap()
+                    pix.save(temp_image_path)
+                    temp_images.append(temp_image_path)
+                
+                # Create PPTX with images
+                prs = Presentation()
+                # Set slide size based on PDF page size if possible
+                if len(doc) > 0:
+                    first_page = doc[0]
+                    page_width, page_height = first_page.rect.width, first_page.rect.height
+                    prs.slide_width = int(page_width * 12700) # Convert points to EMUs
+                    prs.slide_height = int(page_height * 12700)
 
-            for temp_image in temp_images:
-                slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
-                # Add picture, centered and scaled to fit
-                left = top = 0
-                pic = slide.shapes.add_picture(temp_image, left, top, width=prs.slide_width, height=prs.slide_height)
-                os.remove(temp_image)
-            
-            prs.save(output_path)
-            doc.close()
-            return True
+                for temp_image in temp_images:
+                    slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
+                    # Add picture, centered and scaled to fit
+                    left = top = 0
+                    pic = slide.shapes.add_picture(temp_image, left, top, width=prs.slide_width, height=prs.slide_height)
+                    # No need to os.remove(temp_image) here, TemporaryDirectory handles cleanup
+                
+                prs.save(output_path)
+                doc.close()
+                return True
         except Exception as e:
             logger.error(f"PDF to PPTX conversion error: {e}")
             return False
