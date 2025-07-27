@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from uuid import uuid4
@@ -14,12 +14,17 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Universal File Converter API", version="1.0.0")
 
 # Enable CORS for all origins (adjust as needed)
+# WARNING: For production, restrict allow_origins to specific domains to prevent security risks.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # Consider changing to specific origins in production, e.g., ["https://yourdomain.com"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,10 +34,31 @@ app.add_middleware(
 conversion_service = ConversionService()
 
 # In-memory job store (replace with persistent storage in production)
+# For production, consider using a database (e.g., PostgreSQL, Redis) for persistent job storage
+# and better scalability.
 jobs = {}
 
 # File hash mapping to avoid storing duplicate files
 file_hash_mapping = {}  # hash -> {filename, upload_path}
+
+# Security configurations
+API_KEY = os.getenv("API_KEY") # Load API key from environment variable
+MAX_FILE_SIZE_MB = 100 # Maximum file size allowed for upload in MB
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# Dependency for API Key authentication
+async def get_api_key(api_key: str = Depends(lambda x: x.headers.get("X-API-Key"))):
+    if API_KEY is None:
+        logger.warning("API_KEY environment variable is not set. API key authentication is disabled.")
+        return True # Allow access if API_KEY is not set (for development convenience)
+    
+    if api_key is None or api_key != API_KEY:
+        logger.warning(f"Unauthorized access attempt with API Key: {api_key}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API Key"
+        )
+    return True
 
 # Example supported formats (expand as needed)
 supported_formats = [
@@ -276,7 +302,7 @@ async def scheduled_cleanup():
 # Start the scheduler
 scheduler.start()
 
-@app.post("/convert")
+@app.post("/convert", dependencies=[Depends(get_api_key)])
 async def convert_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -284,6 +310,24 @@ async def convert_file(
     destinationFormat: str = Form(...)
 ):
     try:
+        # Validate file size
+        file_content = await file.read()
+        if len(file_content) > MAX_FILE_SIZE_BYTES:
+            logger.warning(f"File size exceeds limit: {file.filename} ({len(file_content)} bytes)")
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File size exceeds the maximum limit of {MAX_FILE_SIZE_MB} MB."
+            )
+        
+        # Sanitize filename to prevent path traversal
+        original_filename = os.path.basename(file.filename)
+        if ".." in original_filename or "/" in original_filename or "\\" in original_filename:
+            logger.warning(f"Attempted path traversal with filename: {file.filename}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid filename. Path traversal attempts are not allowed."
+            )
+
         # Validate input formats
         source_format = sourceFormat.upper()
         destination_format = destinationFormat.upper()
@@ -303,23 +347,23 @@ async def convert_file(
                     break
         
         if not supported_conversion:
+            logger.warning(f"Unsupported conversion attempt: {sourceFormat} to {destinationFormat}")
             raise HTTPException(
-                status_code=400, 
+                status_code=status.HTTP_400_BAD_REQUEST, 
                 detail=f"Conversion from {sourceFormat} to {destinationFormat} is not supported"
             )
         
         # Generate job ID and file paths
         job_id = str(uuid4())
         
-        # Read file content and get its hash
-        file_content = await file.read()
-        upload_path, file_hash = await get_or_create_file_path(file_content, file.filename)
+        # Get or create file path based on hash
+        upload_path, file_hash = await get_or_create_file_path(file_content, original_filename)
         
         # Log whether file was reused or created new
         if file_hash in file_hash_mapping and any(job.get("file_hash") == file_hash for job in jobs.values()):
-            print(f"Reusing existing file with hash {file_hash[:8]}... for job {job_id}")
+            logger.info(f"Reusing existing file with hash {file_hash[:8]}... for job {job_id}")
         else:
-            print(f"Created new file with hash {file_hash[:8]}... for job {job_id}")
+            logger.info(f"Created new file with hash {file_hash[:8]}... for job {job_id}")
         
         # Determine output file extension
         output_extension = f".{destination_format.lower()}"
@@ -344,7 +388,7 @@ async def convert_file(
             "error": None,
             "source_format": source_format,
             "destination_format": destination_format,
-            "original_filename": file.filename,
+            "original_filename": original_filename, # Use sanitized filename
             "file_hash": file_hash
         }
         
@@ -361,12 +405,113 @@ async def convert_file(
         # Clean up any temporary files
         background_tasks.add_task(cleanup_temp_files, CONVERTED_DIR)
         
+        logger.info(f"Conversion job {job_id} initiated for {original_filename}.")
         return {"jobId": job_id}
         
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+        logger.error(f"Error processing file for conversion: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An internal server error occurred.")
+
+@app.get("/status/{jobId}")
+def get_status(jobId: str):
+    job = jobs.get(jobId)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+    resp = {
+        "status": job["status"],
+        "progress": job["progress"],
+        "downloadUrl": f"/download/{jobId}" if job["status"] == "completed" else None,
+        "error": job["error"],
+        "conversion_method": job.get("conversion_method"),
+        "warning": job.get("warning")
+    }
+    return resp
+
+@app.get("/download/{jobId}")
+def download_file(jobId: str):
+    job = jobs.get(jobId)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+    
+    if job["status"] != "completed":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File conversion not completed yet.")
+    
+    if not job["converted_path"] or not os.path.exists(job["converted_path"]):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Converted file not found.")
+    
+    # Generate a meaningful filename for download
+    original_name = job.get("original_filename", "converted_file")
+    name_without_ext = os.path.splitext(original_name)[0]
+    destination_format = job.get("destination_format", "").lower()
+    
+    if destination_format == "jpg":
+        download_filename = f"{name_without_ext}.jpg"
+    elif destination_format == "docx":
+        download_filename = f"{name_without_ext}.docx"
+    elif destination_format == "xlsx":
+        download_filename = f"{name_without_ext}.xlsx"
+    elif destination_format == "pptx":
+        download_filename = f"{name_without_ext}.pptx"
+    else:
+        download_filename = f"{name_without_ext}.{destination_format}"
+    
+    logger.info(f"Serving download for job {jobId}: {download_filename}")
+    return FileResponse(
+        job["converted_path"], 
+        filename=download_filename,
+        media_type='application/octet-stream'
+    )
+
+@app.get("/formats")
+def get_formats():
+    """Get all supported conversion formats"""
+    return supported_formats
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "message": "Universal File Converter API is running"}
+
+@app.get("/")
+def root():
+    """Root endpoint with API information"""
+    return {
+        "message": "Universal File Converter API",
+        "version": "1.0.0",
+        "endpoints": {
+            "convert": "POST /convert - Convert a file",
+            "status": "GET /status/{jobId} - Check conversion status",
+            "download": "GET /download/{jobId} - Download converted file",
+            "formats": "GET /formats - Get supported formats",
+            "health": "GET /health - Health check"
+        }
+    }
+
+@app.delete("/jobs/{jobId}", dependencies=[Depends(get_api_key)])
+def delete_job(jobId: str):
+    """Delete a job and cleanup associated files"""
+    job = jobs.get(jobId)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    
+    # Remove converted file if it exists
+    if job.get("converted_path") and os.path.exists(job["converted_path"]):
+        try:
+            os.remove(job["converted_path"])
+            logger.info(f"Removed converted file for job {jobId}: {job['converted_path']}")
+        except Exception as e:
+            logger.error(f"Error removing converted file for job {jobId}: {e}")
+    
+    # Remove job from tracking
+    del jobs[jobId]
+    
+    # Clean up unused files (asynchronously)
+    asyncio.create_task(cleanup_unused_files())
+    
+    logger.info(f"Job {jobId} deleted successfully.")
+    return {"message": "Job deleted successfully"}
 
 @app.get("/status/{jobId}")
 def get_status(jobId: str):
@@ -442,29 +587,31 @@ def root():
         }
     }
 
-@app.delete("/jobs/{jobId}")
+@app.delete("/jobs/{jobId}", dependencies=[Depends(get_api_key)])
 def delete_job(jobId: str):
     """Delete a job and cleanup associated files"""
     job = jobs.get(jobId)
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
     
     # Remove converted file if it exists
     if job.get("converted_path") and os.path.exists(job["converted_path"]):
         try:
             os.remove(job["converted_path"])
+            logger.info(f"Removed converted file for job {jobId}: {job['converted_path']}")
         except Exception as e:
-            print(f"Error removing converted file: {e}")
+            logger.error(f"Error removing converted file for job {jobId}: {e}")
     
     # Remove job from tracking
     del jobs[jobId]
     
-    # Clean up unused files
+    # Clean up unused files (asynchronously)
     asyncio.create_task(cleanup_unused_files())
     
+    logger.info(f"Job {jobId} deleted successfully.")
     return {"message": "Job deleted successfully"}
 
-@app.get("/jobs")
+@app.get("/jobs", dependencies=[Depends(get_api_key)])
 def list_jobs():
     """List all jobs (for debugging/admin purposes)"""
     job_list = []
@@ -478,21 +625,23 @@ def list_jobs():
             "originalFilename": job_data.get("original_filename"),
             "error": job_data.get("error")
         })
+    logger.info("Listed all jobs.")
     return {"jobs": job_list}
 
-@app.get("/cleanup")
+@app.get("/cleanup", dependencies=[Depends(get_api_key)])
 async def trigger_cleanup(background_tasks: BackgroundTasks):
     """Manually trigger cleanup of unused files and temporary files"""
     try:
         background_tasks.add_task(cleanup_unused_files)
         background_tasks.add_task(cleanup_temp_files, CONVERTED_DIR)
         background_tasks.add_task(cleanup_temp_files, UPLOAD_DIR)
+        logger.info("Manual cleanup initiated.")
         return {"message": "Cleanup initiated"}
     except Exception as e:
-        logging.error(f"Error in cleanup endpoint: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in cleanup endpoint: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error during cleanup.")
 
-@app.get("/storage/stats")
+@app.get("/storage/stats", dependencies=[Depends(get_api_key)])
 def get_storage_stats():
     """Get storage statistics"""
     upload_files = len([f for f in os.listdir(UPLOAD_DIR) if os.path.isfile(os.path.join(UPLOAD_DIR, f))])
@@ -500,6 +649,7 @@ def get_storage_stats():
     active_jobs = len(jobs)
     unique_files = len(file_hash_mapping)
     
+    logger.info("Retrieved storage statistics.")
     return {
         "upload_files": upload_files,
         "converted_files": converted_files,

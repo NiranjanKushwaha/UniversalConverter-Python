@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import io
 import re
+import shlex
 
 # Document processing
 from PyPDF2 import PdfReader, PdfWriter
@@ -301,7 +302,7 @@ class ConversionService:
                 '--headless',
                 '--convert-to', 'docx',
                 '--outdir', os.path.dirname(output_path),
-                input_path
+                shlex.quote(input_path)
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             jobs[job_id]["progress"] = 60
@@ -323,7 +324,7 @@ class ConversionService:
                 logger.warning(f"LibreOffice failed: {result.stderr}")
         except Exception as e:
             logger.warning(f"LibreOffice not available or failed: {e}")
-            jobs[job_id]["error"] = f"LibreOffice not available or failed: {e}"
+            jobs[job_id]["error"] = "An error occurred during conversion."
 
         # Method 2: PyMuPDF + pdfplumber (Python-based, good fallback)
         try:
@@ -487,30 +488,6 @@ class ConversionService:
         jobs[job_id]["warning"] = "DOC to DOCX conversion is not fully supported. Saving as DOCX with a .doc extension. For true .doc conversion, external tools like LibreOffice are recommended."
         return self._pdf_to_docx(input_path, output_path, job_id, jobs)
     
-    def _pdf_to_doc(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
-        # Convert to DOCX first, then save as DOC (limited support)
-        # Note: Saving as .doc directly from python-docx is not supported.
-        # This will effectively save a .docx file with a .doc extension.
-        # For true .doc conversion, external tools like LibreOffice would be needed.
-        logger.warning("DOC to DOCX conversion is not fully supported. Saving as DOCX with a .doc extension.")
-        jobs[job_id]["warning"] = "DOC to DOCX conversion is not fully supported. Saving as DOCX with a .doc extension. For true .doc conversion, external tools like LibreOffice are recommended."
-        return self._pdf_to_docx(input_path, output_path, job_id, jobs)
-    
-    def _pdf_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
-        try:
-            reader = PdfReader(input_path)
-            text_content = ""
-            
-            for page_num, page in enumerate(reader.pages):
-                jobs[job_id]["progress"] = 20 + (page_num / len(reader.pages)) * 60
-                text_content += page.extract_text() + "\n\n"
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(text_content)
-            return True
-        except Exception as e:
-            logger.error(f"PDF to TXT conversion error: {e}")
-            return False
     
     def _pdf_to_html(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
@@ -894,7 +871,7 @@ class ConversionService:
 
         # Method 3: unoconv (LibreOffice wrapper)
         try:
-            cmd = ['unoconv', '-f', 'pdf', '-o', output_path, input_path]
+            cmd = ['unoconv', '-f', 'pdf', '-o', shlex.quote(output_path), shlex.quote(input_path)]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 jobs[job_id]["progress"] = 100
@@ -904,14 +881,14 @@ class ConversionService:
                 return True
             else:
                 logger.warning(f"unoconv failed: {result.stderr}")
-                jobs[job_id]["error"] = f"unoconv failed: {result.stderr}"
+                jobs[job_id]["error"] = "An error occurred during conversion."
         except Exception as e:
             logger.warning(f"unoconv not available or failed: {e}")
-            jobs[job_id]["error"] = f"unoconv not available or failed: {e}"
+            jobs[job_id]["error"] = "An error occurred during conversion."
 
         # Method 4: pandoc (if available)
         try:
-            cmd = ['pandoc', input_path, '-o', output_path]
+            cmd = ['pandoc', shlex.quote(input_path), '-o', shlex.quote(output_path)]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 jobs[job_id]["progress"] = 100
@@ -921,10 +898,10 @@ class ConversionService:
                 return True
             else:
                 logger.warning(f"pandoc failed: {result.stderr}")
-                jobs[job_id]["error"] = f"pandoc failed: {result.stderr}"
+                jobs[job_id]["error"] = "An error occurred during conversion."
         except Exception as e:
             logger.warning(f"pandoc not available or failed: {e}")
-            jobs[job_id]["error"] = f"pandoc not available or failed: {e}"
+            jobs[job_id]["error"] = "An error occurred during conversion."
 
         # Method 5: Enhanced python-docx + reportlab (preserve block order)
         try:
@@ -1254,195 +1231,6 @@ class ConversionService:
             logger.warning(f"LibreOffice not available or failed: {e}")
     
     # DOC Conversion Methods (similar to DOCX but with limited support)
-    def _doc_to_pdf(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
-        """Robust DOC to PDF conversion with multiple fallbacks for cross-platform support."""
-        import subprocess
-        import shutil
-        import os
-        
-        jobs[job_id]["progress"] = 10
-        
-        # Method 1: LibreOffice (soffice) - Best quality, handles complex DOC files
-        try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            cmd = [
-                'soffice',
-                '--headless',
-                '--convert-to', 'pdf',
-                '--outdir', os.path.dirname(output_path),
-                input_path
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            jobs[job_id]["progress"] = 60
-            
-            if result.returncode == 0:
-                base_name = os.path.splitext(os.path.basename(input_path))[0]
-                generated_pdf = os.path.join(os.path.dirname(output_path), base_name + ".pdf")
-                if os.path.abspath(generated_pdf) != os.path.abspath(output_path):
-                    shutil.move(generated_pdf, output_path)
-                jobs[job_id]["progress"] = 100
-                logger.info("DOC to PDF: LibreOffice conversion successful")
-                return True
-            else:
-                logger.warning(f"LibreOffice failed: {result.stderr}")
-        except Exception as e:
-            logger.warning(f"LibreOffice not available or failed: {e}")
-
-        # Method 2: unoconv (LibreOffice wrapper)
-        try:
-            cmd = ['unoconv', '-f', 'pdf', '-o', output_path, input_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0:
-                jobs[job_id]["progress"] = 100
-                logger.info("DOC to PDF: unoconv conversion successful")
-                return True
-            else:
-                logger.warning(f"unoconv failed: {result.stderr}")
-        except Exception as e:
-            logger.warning(f"unoconv not available or failed: {e}")
-
-        # Method 3: pandoc (if available)
-        try:
-            cmd = ['pandoc', input_path, '-o', output_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0:
-                jobs[job_id]["progress"] = 100
-                logger.info("DOC to PDF: pandoc conversion successful")
-                return True
-            else:
-                logger.warning(f"pandoc failed: {result.stderr}")
-        except Exception as e:
-            logger.warning(f"pandoc not available or failed: {e}")
-
-        # Method 4: antiword (Linux/Unix only)
-        try:
-            cmd = ['antiword', input_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode == 0:
-                # Convert text to PDF
-                from reportlab.pdfgen import canvas
-                from reportlab.lib.pagesizes import letter
-                
-                c = canvas.Canvas(output_path, pagesize=letter)
-                width, height = letter
-                
-                lines = result.stdout.split('\n')
-                y = height - 50
-                
-                for line in lines[:100]:  # Limit to first 100 lines
-                    if y < 50:
-                        c.showPage()
-                        y = height - 50
-                    
-                    if len(line) > 80:
-                        line = line[:80] + "..."
-                    
-                    c.drawString(50, y, line)
-                    y -= 15
-                
-                c.save()
-                jobs[job_id]["progress"] = 100
-                logger.info("DOC to PDF: antiword conversion successful")
-                return True
-            else:
-                logger.warning(f"antiword failed: {result.stderr}")
-        except Exception as e:
-            logger.warning(f"antiword not available or failed: {e}")
-
-        # Method 5: catdoc (Linux/Unix only)
-        try:
-            cmd = ['catdoc', input_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode == 0:
-                # Convert text to PDF
-                from reportlab.pdfgen import canvas
-                from reportlab.lib.pagesizes import letter
-                
-                c = canvas.Canvas(output_path, pagesize=letter)
-                width, height = letter
-                
-                lines = result.stdout.split('\n')
-                y = height - 50
-                
-                for line in lines[:100]:  # Limit to first 100 lines
-                    if y < 50:
-                        c.showPage()
-                        y = height - 50
-                    
-                    if len(line) > 80:
-                        line = line[:80] + "..."
-                    
-                    c.drawString(50, y, line)
-                    y -= 15
-                
-                c.save()
-                jobs[job_id]["progress"] = 100
-                logger.info("DOC to PDF: catdoc conversion successful")
-                return True
-            else:
-                logger.warning(f"catdoc failed: {result.stderr}")
-        except Exception as e:
-            logger.warning(f"catdoc not available or failed: {e}")
-
-        # Method 6: Basic text extraction (last resort)
-        try:
-            with open(input_path, 'rb') as f:
-                content = f.read()
-            
-            # Very basic text extraction (this is limited)
-            text_content = content.decode('utf-8', errors='ignore')
-            
-            # Remove non-printable characters
-            import re
-            text_content = re.sub(r'[^\x20-\x7E\n\r\t]', '', text_content)
-            
-            if text_content.strip():
-                from reportlab.pdfgen import canvas
-                from reportlab.lib.pagesizes import letter
-                
-                c = canvas.Canvas(output_path, pagesize=letter)
-                width, height = letter
-                
-                lines = text_content.split('\n')
-                y = height - 50
-                
-                for line in lines[:50]:  # Limit to first 50 lines
-                    if y < 50:
-                        c.showPage()
-                        y = height - 50
-                    
-                    if len(line) > 80:
-                        line = line[:80] + "..."
-                    
-                    c.drawString(50, y, line)
-                    y -= 20
-                
-                c.save()
-                jobs[job_id]["progress"] = 100
-                logger.info("DOC to PDF: Basic text extraction successful")
-                return True
-            else:
-                logger.error("No readable text found in DOC file")
-                return False
-                
-        except Exception as e:
-            logger.error(f"All DOC to PDF methods failed: {e}")
-            jobs[job_id]["error"] = f"DOC to PDF conversion failed: {e}"
-            return False
-    
-    def _doc_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
-        try:
-            with open(input_path, 'rb') as f:
-                content = f.read()
-            
-            text_content = content.decode('utf-8', errors='ignore')
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(text_content)
-            return True
-        except Exception as e:
-            logger.error(f"DOC to TXT conversion error: {e}")
-            return False
     
     def _doc_to_html(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
@@ -1506,7 +1294,7 @@ class ConversionService:
 
         # Method 2: unoconv (LibreOffice wrapper)
         try:
-            cmd = ['unoconv', '-f', 'pdf', '-o', output_path, input_path]
+            cmd = ['unoconv', '-f', 'pdf', '-o', shlex.quote(output_path), shlex.quote(input_path)]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 jobs[job_id]["progress"] = 100
@@ -2189,7 +1977,7 @@ class ConversionService:
         
         # Method 1: wkhtmltopdf (best for complex HTML with CSS)
         try:
-            cmd = ['wkhtmltopdf', '--quiet', '--no-stop-slow-scripts', input_path, output_path]
+            cmd = ['wkhtmltopdf', '--quiet', '--no-stop-slow-scripts', shlex.quote(input_path), shlex.quote(output_path)]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             jobs[job_id]["progress"] = 60
             
@@ -2728,6 +2516,8 @@ class ConversionService:
         # Method 2: unoconv (LibreOffice wrapper)
         try:
             cmd = ['unoconv', '-f', 'pdf', '-o', output_path, input_path]
+            cmd[-2] = shlex.quote(cmd[-2])
+            cmd[-1] = shlex.quote(cmd[-1])
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 jobs[job_id]["progress"] = 100
