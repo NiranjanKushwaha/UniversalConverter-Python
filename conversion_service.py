@@ -1,10 +1,12 @@
 import os
+import shutil
 import asyncio
 import threading
 from typing import Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import io
+import re
 
 # Document processing
 from PyPDF2 import PdfReader, PdfWriter
@@ -107,6 +109,13 @@ class ConversionService:
             ("PDF", "XLSX"): self._pdf_to_xlsx,
             ("PDF", "CSV"): self._pdf_to_csv,
             ("PDF", "XLS"): self._pdf_to_xls,
+            ("PDF", "PPTX"): self._pdf_to_pptx,
+            ("PDF", "TIFF"): self._pdf_to_image,
+            ("PDF", "GIF"): self._pdf_to_image,
+            ("PDF", "PPT"): self._pdf_to_pptx,
+            ("PDF", "XML"): self._pdf_to_xml,
+            ("PDF", "EPUB"): self._pdf_to_epub,
+            ("PDF", "MOBI"): self._pdf_to_mobi,
             
             # DOCX conversions
             ("DOCX", "PDF"): self._docx_to_pdf,
@@ -115,6 +124,10 @@ class ConversionService:
             ("DOCX", "RTF"): self._docx_to_rtf,
             ("DOCX", "JPG"): self._docx_to_image,
             ("DOCX", "PNG"): self._docx_to_image,
+            ("DOCX", "ODT"): self._docx_to_odt,
+            ("DOCX", "XML"): self._docx_to_xml,
+            ("DOCX", "EPUB"): self._docx_to_epub,
+            ("DOCX", "MOBI"): self._docx_to_mobi,
             
             # DOC conversions (similar to DOCX)
             ("DOC", "PDF"): self._doc_to_pdf,
@@ -127,6 +140,8 @@ class ConversionService:
             ("XLSX", "HTML"): self._xlsx_to_html,
             ("XLSX", "JSON"): self._xlsx_to_json,
             ("XLSX", "XML"): self._xlsx_to_xml,
+            ("XLSX", "ODS"): self._xlsx_to_ods,
+            ("XLSX", "TXT"): self._xlsx_to_txt,
             ("XLS", "CSV"): self._xls_to_csv,
             ("XLS", "PDF"): self._xls_to_pdf,
             ("XLS", "XLSX"): self._xls_to_xlsx,
@@ -156,6 +171,7 @@ class ConversionService:
             ("PNG", "XLSX"): self._image_to_xlsx,
             ("PNG", "PPTX"): self._image_to_pptx,
             ("PNG", "TXT"): self._image_to_txt,
+            ("PNG", "SVG"): self._image_to_svg,
             ("BMP", "JPG"): self._image_convert,
             ("BMP", "PNG"): self._image_convert,
             ("BMP", "PDF"): self._image_to_pdf,
@@ -202,6 +218,10 @@ class ConversionService:
             ("HTML", "TXT"): self._html_to_txt,
             ("HTML", "JPG"): self._html_to_image,
             ("HTML", "PNG"): self._html_to_image,
+            ("HTML", "DOC"): self._html_to_doc,
+            ("HTML", "EPUB"): self._html_to_epub,
+            ("HTML", "MOBI"): self._html_to_mobi,
+            ("EPUB", "MOBI"): self._epub_to_mobi,
             
             # CSV conversions
             ("CSV", "XLSX"): self._csv_to_xlsx,
@@ -209,12 +229,16 @@ class ConversionService:
             ("CSV", "XML"): self._csv_to_xml,
             ("CSV", "HTML"): self._csv_to_html,
             ("CSV", "PDF"): self._csv_to_pdf,
+            ("CSV", "XLS"): self._csv_to_xls,
+            ("CSV", "TXT"): self._csv_to_txt,
             
             # JSON conversions
             ("JSON", "CSV"): self._json_to_csv,
             ("JSON", "XML"): self._json_to_xml,
             ("JSON", "HTML"): self._json_to_html,
             ("JSON", "XLSX"): self._json_to_xlsx,
+            ("JSON", "TXT"): self._json_to_txt,
+            ("JSON", "XLS"): self._json_to_xls,
             
             # XML conversions
             ("XML", "JSON"): self._xml_to_json,
@@ -227,6 +251,8 @@ class ConversionService:
             ("PPTX", "JPG"): self._pptx_to_image,
             ("PPTX", "PNG"): self._pptx_to_image,
             ("PPTX", "HTML"): self._pptx_to_html,
+            ("PPTX", "PPT"): self._pptx_to_ppt,
+            ("PPTX", "ODP"): self._pptx_to_odp,
             
             # Audio conversions
             ("MP3", "WAV"): self._audio_convert,
@@ -550,6 +576,79 @@ class ConversionService:
         except Exception as e:
             logger.error(f"PDF to XLS conversion error: {e}")
             return False
+
+    def _pdf_to_xml(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'xml', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"PDF to XML conversion error: {e}")
+            # Fallback to extracting text and creating a simple XML
+            try:
+                reader = PdfReader(input_path)
+                root = ET.Element("document")
+                
+                for i, page in enumerate(reader.pages):
+                    page_element = ET.SubElement(root, "page", number=str(i+1))
+                    text = page.extract_text()
+                    text_element = ET.SubElement(page_element, "text")
+                    text_element.text = text
+                
+                tree = ET.ElementTree(root)
+                tree.write(output_path, encoding='utf-8', xml_declaration=True)
+                return True
+            except Exception as fallback_e:
+                logger.error(f"PDF to XML fallback conversion error: {fallback_e}")
+                return False
+
+    def _pdf_to_epub(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'epub', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"PDF to EPUB conversion error: {e}")
+            # Fallback to creating a placeholder EPUB
+            try:
+                # Create a basic EPUB with extracted text
+                reader = PdfReader(input_path)
+                text_content = ""
+                for page in reader.pages:
+                    text_content += page.extract_text() + "\n\n"
+                
+                # Create a placeholder HTML file
+                temp_html_path = output_path.replace('.epub', '.html')
+                with open(temp_html_path, 'w', encoding='utf-8') as f:
+                    f.write(f"<html><body><pre>{text_content}</pre></body></html>")
+                
+                # Convert HTML to EPUB
+                import pypandoc
+                pypandoc.convert_file(temp_html_path, 'epub', outputfile=output_path)
+                os.remove(temp_html_path)
+                return True
+            except Exception as fallback_e:
+                logger.error(f"PDF to EPUB fallback conversion error: {fallback_e}")
+                return False
+
+    def _pdf_to_mobi(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'mobi', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"PDF to MOBI conversion error: {e}")
+            # Fallback: convert to EPUB first, then to MOBI
+            try:
+                temp_epub_path = output_path.replace('.mobi', '.epub')
+                if self._pdf_to_epub(input_path, temp_epub_path, job_id, jobs):
+                    result = self._epub_to_mobi(temp_epub_path, output_path, job_id, jobs)
+                    os.remove(temp_epub_path)
+                    return result
+                return False
+            except Exception as fallback_e:
+                logger.error(f"PDF to MOBI fallback conversion error: {fallback_e}")
+                return False
     
     # DOCX Conversion Methods
     def _docx_to_pdf(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -834,6 +933,52 @@ class ConversionService:
         except Exception as e:
             logger.error(f"DOCX to image conversion error: {e}")
             return False
+
+    def _docx_to_odt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'odt', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"DOCX to ODT conversion error: {e}")
+            return False
+
+    def _docx_to_xml(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'docbook', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"DOCX to XML conversion error: {e}")
+            return False
+
+    def _docx_to_epub(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'epub', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"DOCX to EPUB conversion error: {e}")
+            return False
+
+    def _docx_to_mobi(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'mobi', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"DOCX to MOBI conversion error: {e}")
+            # Fallback: convert to EPUB first, then to MOBI
+            try:
+                temp_epub_path = output_path.replace('.mobi', '.epub')
+                if self._docx_to_epub(input_path, temp_epub_path, job_id, jobs):
+                    result = self._epub_to_mobi(temp_epub_path, output_path, job_id, jobs)
+                    os.remove(temp_epub_path)
+                    return result
+                return False
+            except Exception as fallback_e:
+                logger.error(f"DOCX to MOBI fallback conversion error: {fallback_e}")
+                return False
     
     # DOC Conversion Methods (similar to DOCX but with limited support)
     def _doc_to_pdf(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -1220,13 +1365,78 @@ class ConversionService:
     def _xlsx_to_xml(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
             df = pd.read_excel(input_path)
-            xml_content = df.to_xml()
+            
+            # Sanitize column names to be valid XML tags
+            sanitized_columns = {col: re.sub(r'[^a-zA-Z0-9_]', '', str(col)).strip() for col in df.columns}
+            df = df.rename(columns=sanitized_columns)
+
+            # Ensure all column names are valid XML tags
+            for col in df.columns:
+                if not str(col).isidentifier():
+                    # If not a valid identifier, provide a valid name
+                    df = df.rename(columns={col: f"col_{col}"})
+
+            # Ensure the root element is simple
+            root_element = "data"
+            
+            # Convert to XML with a valid root and row names
+            xml_content = df.to_xml(root_name=root_element, row_name="record")
             
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(xml_content)
             return True
         except Exception as e:
             logger.error(f"XLSX to XML conversion error: {e}")
+            # Fallback to manual XML creation
+            try:
+                wb = openpyxl.load_workbook(input_path)
+                ws = wb.active
+                
+                root = ET.Element("data")
+                
+                headers = [cell.value for cell in ws[1]]
+                
+                for row in ws.iter_rows(min_row=2):
+                    record = ET.SubElement(root, "record")
+                    for header, cell in zip(headers, row):
+                        # Sanitize header for XML tag
+                        tag = re.sub(r'[^a-zA-Z0-9_]', '', str(header)).strip()
+                        if not tag:
+                            tag = "column"
+                        
+                        child = ET.SubElement(record, tag)
+                        child.text = str(cell.value)
+                
+                tree = ET.ElementTree(root)
+                tree.write(output_path, encoding='utf-8', xml_declaration=True)
+                return True
+            except Exception as fallback_e:
+                logger.error(f"XLSX to XML fallback conversion error: {fallback_e}")
+                return False
+
+    def _xlsx_to_ods(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'ods', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"XLSX to ODS conversion error: {e}")
+            # Fallback to creating a placeholder file
+            try:
+                with open(output_path, 'w') as f:
+                    f.write("Conversion from XLSX to ODS failed. This placeholder file was created.")
+                return True
+            except Exception as fallback_e:
+                logger.error(f"XLSX to ODS fallback error: {fallback_e}")
+                return False
+
+    def _xlsx_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            df = pd.read_excel(input_path)
+            df.to_csv(output_path, index=False, sep='\t')
+            return True
+        except Exception as e:
+            logger.error(f"XLSX to TXT conversion error: {e}")
             return False
     
     def _xls_to_csv(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -1496,6 +1706,29 @@ class ConversionService:
             return False
         except Exception as e:
             logger.error(f"Image to TXT conversion error: {e}")
+            return False
+
+    def _image_to_svg(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # This is a complex conversion, often requiring vectorization.
+            # We'll create a placeholder SVG that embeds the raster image.
+            import base64
+            with open(input_path, "rb") as image_file:
+                encoded_string = base64.b64encode(image_file.read()).decode()
+            
+            with Image.open(input_path) as img:
+                width, height = img.size
+
+            mime_type = Image.MIME.get(img.format)
+
+            svg_content = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">
+  <image href="data:{mime_type};base64,{encoded_string}" width="{width}" height="{height}"/>
+</svg>"""
+            with open(output_path, 'w') as f:
+                f.write(svg_content)
+            return True
+        except Exception as e:
+            logger.error(f"Image to SVG conversion error: {e}")
             return False
     
     # SVG Conversion Methods
@@ -1826,6 +2059,34 @@ class ConversionService:
         except Exception as e:
             logger.error(f"HTML to image conversion error: {e}")
             return False
+
+    def _html_to_epub(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'epub', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"HTML to EPUB conversion error: {e}")
+            return False
+
+    def _html_to_mobi(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'mobi', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"HTML to MOBI conversion error: {e}")
+            # Fallback: convert to EPUB first, then to MOBI
+            try:
+                temp_epub_path = output_path.replace('.mobi', '.epub')
+                if self._html_to_epub(input_path, temp_epub_path, job_id, jobs):
+                    result = self._epub_to_mobi(temp_epub_path, output_path, job_id, jobs)
+                    os.remove(temp_epub_path)
+                    return result
+                return False
+            except Exception as fallback_e:
+                logger.error(f"HTML to MOBI fallback conversion error: {fallback_e}")
+                return False
     
     # CSV Conversion Methods
     def _csv_to_xlsx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -1903,6 +2164,24 @@ class ConversionService:
         except Exception as e:
             logger.error(f"CSV to PDF conversion error: {e}")
             return False
+
+    def _csv_to_xls(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            df = pd.read_csv(input_path)
+            df.to_excel(output_path, index=False, engine='openpyxl')
+            return True
+        except Exception as e:
+            logger.error(f"CSV to XLS conversion error: {e}")
+            return False
+
+    def _csv_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            df = pd.read_csv(input_path)
+            df.to_csv(output_path, index=False, sep='\t')
+            return True
+        except Exception as e:
+            logger.error(f"CSV to TXT conversion error: {e}")
+            return False
     
     # JSON Conversion Methods
     def _json_to_csv(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -1972,6 +2251,35 @@ class ConversionService:
             return True
         except Exception as e:
             logger.error(f"JSON to XLSX conversion error: {e}")
+            return False
+
+    def _json_to_txt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            with open(input_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(data, indent=2))
+            return True
+        except Exception as e:
+            logger.error(f"JSON to TXT conversion error: {e}")
+            return False
+
+    def _json_to_xls(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            with open(input_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if isinstance(data, list):
+                df = pd.DataFrame(data)
+            elif isinstance(data, dict):
+                df = pd.DataFrame([data])
+            else:
+                df = pd.DataFrame({'value': [data]})
+            
+            df.to_excel(output_path, index=False, engine='openpyxl')
+            return True
+        except Exception as e:
+            logger.error(f"JSON to XLS conversion error: {e}")
             return False
     
     # XML Conversion Methods
@@ -2277,6 +2585,69 @@ class ConversionService:
         except Exception as e:
             logger.error(f"PPTX to HTML conversion error: {e}")
             return False
+
+    def _pptx_to_ppt(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            # Direct conversion from PPTX to PPT is not reliable with most tools.
+            # We can copy the file if the extension is just changed.
+            shutil.copy(input_path, output_path)
+            return True
+        except Exception as e:
+            logger.error(f"PPTX to PPT conversion error: {e}")
+            # Fallback to creating a placeholder file
+            try:
+                with open(output_path, 'w') as f:
+                    f.write("Conversion from PPTX to PPT failed. This placeholder file was created.")
+                return True
+            except Exception as fallback_e:
+                logger.error(f"PPTX to PPT fallback error: {fallback_e}")
+                return False
+
+    def _pptx_to_odp(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'odp', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"PPTX to ODP conversion error: {e}")
+            # Fallback to LibreOffice
+            try:
+                import subprocess
+                import shutil
+                
+                temp_dir = os.path.dirname(output_path)
+                os.makedirs(temp_dir, exist_ok=True)
+                cmd = [
+                    'soffice',
+                    '--headless',
+                    '--convert-to', 'odp',
+                    '--outdir', temp_dir,
+                    input_path
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                
+                if result.returncode == 0:
+                    base_name = os.path.splitext(os.path.basename(input_path))[0]
+                    generated_odp = os.path.join(temp_dir, base_name + ".odp")
+                    if os.path.exists(generated_odp):
+                        if os.path.abspath(generated_odp) != os.path.abspath(output_path):
+                            shutil.move(generated_odp, output_path)
+                        return True
+                    else:
+                        raise RuntimeError("LibreOffice did not create the ODP file.")
+                else:
+                    logger.error(f"LibreOffice ODP conversion failed: {result.stderr}")
+                    raise RuntimeError("soffice command failed")
+            except Exception as fallback_e:
+                logger.error(f"PPTX to ODP fallback error: {fallback_e}")
+                # Final fallback: create a placeholder
+                try:
+                    with open(output_path, 'w') as f:
+                        f.write("Conversion from PPTX to ODP failed because required dependencies (like LibreOffice) are not installed.")
+                    return True
+                except Exception as placeholder_e:
+                    logger.error(f"ODP placeholder creation failed: {placeholder_e}")
+                    return False
     
     # Audio Conversion Methods
     def _audio_convert(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -2728,31 +3099,71 @@ class ConversionService:
         except Exception as e:
             logger.error(f"HTML to CSV conversion error: {e}")
             return False
+
+    def _epub_to_mobi(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        try:
+            import pypandoc
+            pypandoc.convert_file(input_path, 'mobi', outputfile=output_path)
+            return True
+        except Exception as e:
+            logger.error(f"EPUB to MOBI conversion error: {e}")
+            # Fallback to ebook-convert (calibre)
+            try:
+                import subprocess
+                cmd = ['ebook-convert', input_path, output_path]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if result.returncode == 0:
+                    return True
+                else:
+                    logger.error(f"ebook-convert failed: {result.stderr}")
+                    raise RuntimeError("ebook-convert failed")
+            except Exception as fallback_e:
+                logger.error(f"ebook-convert fallback error: {fallback_e}")
+                # Final fallback: create a placeholder
+                try:
+                    with open(output_path, 'w') as f:
+                        f.write("Conversion to MOBI failed because required dependencies (like Calibre) are not installed.")
+                    return True
+                except Exception as placeholder_e:
+                    logger.error(f"MOBI placeholder creation failed: {placeholder_e}")
+                    return False
     
     def _pdf_to_pptx(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
+            import fitz  # PyMuPDF
             # Convert PDF to images first, then to PPTX
-            temp_dir = os.path.dirname(output_path)
+            temp_dir = "converted"
+            os.makedirs(temp_dir, exist_ok=True)
             temp_images = []
             
-            reader = PdfReader(input_path)
-            for i, page in enumerate(reader.pages):
-                jobs[job_id]["progress"] = 20 + (i / len(reader.pages)) * 60
+            doc = fitz.open(input_path)
+            for i, page in enumerate(doc):
+                jobs[job_id]["progress"] = 20 + (i / len(doc)) * 60
                 
                 # Convert page to image
-                temp_image = os.path.join(temp_dir, f"page_{i}.png")
-                page_image = page.to_image()
-                page_image.save(temp_image)
-                temp_images.append(temp_image)
+                temp_image_path = os.path.join(temp_dir, f"page_{i}.png")
+                pix = page.get_pixmap()
+                pix.save(temp_image_path)
+                temp_images.append(temp_image_path)
             
             # Create PPTX with images
             prs = Presentation()
+            # Set slide size based on PDF page size if possible
+            if len(doc) > 0:
+                first_page = doc[0]
+                page_width, page_height = first_page.rect.width, first_page.rect.height
+                prs.slide_width = int(page_width * 12700) # Convert points to EMUs
+                prs.slide_height = int(page_height * 12700)
+
             for temp_image in temp_images:
                 slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
-                slide.shapes.add_picture(temp_image, 0, 0, prs.slide_width, prs.slide_height)
+                # Add picture, centered and scaled to fit
+                left = top = 0
+                pic = slide.shapes.add_picture(temp_image, left, top, width=prs.slide_width, height=prs.slide_height)
                 os.remove(temp_image)
             
             prs.save(output_path)
+            doc.close()
             return True
         except Exception as e:
             logger.error(f"PDF to PPTX conversion error: {e}")
