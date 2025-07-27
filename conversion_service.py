@@ -28,6 +28,7 @@ import json
 import csv
 import fitz # PyMuPDF
 import pdfplumber # For table extraction from PDF
+import pypandoc # For enhanced document conversions
 
 # Image processing
 from PIL import Image, ImageDraw, ImageFont
@@ -1099,9 +1100,33 @@ class ConversionService:
             return False
     
     def _docx_to_html(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Robust DOCX to HTML conversion using pypandoc with fallback to basic text extraction."""
+        jobs[job_id]["progress"] = 10
+        try:
+            # Method 1: pypandoc (best for preserving formatting, images, tables)
+            import pypandoc
+            pypandoc.convert_file(input_path, 'html', outputfile=output_path)
+            jobs[job_id]["progress"] = 100
+            jobs[job_id]["conversion_method"] = "pypandoc"
+            jobs[job_id]["warning"] = None
+            logger.info("DOCX to HTML: pypandoc conversion successful")
+            return True
+        except ImportError:
+            logger.warning("pypandoc not available. Falling back to basic text extraction.")
+            jobs[job_id]["warning"] = "pypandoc not available. DOCX to HTML conversion used basic text extraction. For best results, install pandoc and pypandoc."
+            return self._docx_to_html_basic_fallback(input_path, output_path, job_id, jobs)
+        except Exception as e:
+            logger.warning(f"pypandoc DOCX to HTML conversion failed: {e}. Falling back to basic text extraction.")
+            jobs[job_id]["warning"] = f"pypandoc DOCX to HTML conversion failed: {e}. DOCX to HTML conversion used basic text extraction. For best results, install pandoc and pypandoc."
+            return self._docx_to_html_basic_fallback(input_path, output_path, job_id, jobs)
+
+    def _docx_to_html_basic_fallback(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Basic DOCX to HTML conversion (text only) as a fallback."""
         try:
             doc = Document(input_path)
             html_content = "<html><body>"
+            
+            html_content += "<!-- Basic HTML conversion: Formatting, images, and tables are not preserved. -->\n"
             
             for para_num, paragraph in enumerate(doc.paragraphs):
                 jobs[job_id]["progress"] = 20 + (para_num / len(doc.paragraphs)) * 60
@@ -1112,9 +1137,12 @@ class ConversionService:
             
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
+            jobs[job_id]["progress"] = 100
+            logger.info("DOCX to HTML basic fallback conversion completed.")
             return True
         except Exception as e:
-            logger.error(f"DOCX to HTML conversion error: {e}")
+            logger.error(f"DOCX to HTML basic fallback conversion error: {e}")
+            jobs[job_id]["error"] = f"DOCX to HTML conversion failed even with basic fallback: {e}"
             return False
     
     def _docx_to_rtf(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
@@ -2335,19 +2363,146 @@ class ConversionService:
             logger.error(f"HTML to TXT conversion error: {e}")
             return False
     
-    def _html_to_image(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+    async def _html_to_image(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Robust HTML to image conversion with multiple fallbacks."""
+        import subprocess
+        import os
+        import asyncio
+        
+        jobs[job_id]["progress"] = 10
+        
+        # Method 1: Playwright (best for complex HTML with CSS, JavaScript, and dynamic content)
         try:
-            # This requires additional setup (like selenium or playwright)
-            # For now, create a placeholder image
-            img = Image.new('RGB', (800, 600), color='white')
-            draw = ImageDraw.Draw(img)
-            draw.text((10, 10), "HTML to Image conversion", fill='black')
-            img.save(output_path)
+            result = await self._html_to_image_playwright(input_path, output_path, job_id, jobs)
+            
+            if result:
+                jobs[job_id]["progress"] = 100
+                logger.info("HTML to image: Playwright conversion successful")
+                return True
+            else:
+                logger.warning("Playwright conversion failed, attempting fallbacks.")
+        except ImportError:
+            logger.warning("Playwright not available. Falling back to other methods.")
+        except Exception as e:
+            logger.warning(f"Playwright conversion failed: {e}. Attempting fallbacks.")
+
+        # Method 2: wkhtmltoimage (best for complex HTML with CSS)
+        try:
+            # Determine output format
+            output_format = os.path.splitext(output_path)[1][1:].lower()
+            
+            cmd = ['wkhtmltoimage', '--quality', '95', shlex.quote(input_path), shlex.quote(output_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            jobs[job_id]["progress"] = 60
+            
+            if result.returncode == 0 and os.path.exists(output_path):
+                jobs[job_id]["progress"] = 100
+                logger.info("HTML to image: wkhtmltoimage conversion successful")
+                return True
+            else:
+                logger.warning(f"wkhtmltoimage failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"wkhtmltoimage not available or failed: {e}")
+
+        # Method 3: imgkit (Python wrapper for wkhtmltoimage)
+        try:
+            import imgkit
+            options = {
+                'quality': 95,
+                'enable-local-file-access': ''
+            }
+            imgkit.from_file(input_path, output_path, options=options)
+            jobs[job_id]["progress"] = 100
+            logger.info("HTML to image: imgkit conversion successful")
             return True
         except Exception as e:
-            logger.error(f"HTML to image conversion error: {e}")
+            logger.warning(f"imgkit fallback failed: {e}")
+
+        # Method 4: BeautifulSoup + PIL (text rendering fallback)
+        try:
+            from bs4 import BeautifulSoup
+            from PIL import Image, ImageDraw, ImageFont
+            
+            with open(input_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.decompose()
+            
+            # Get text content
+            text = soup.get_text()
+            
+            # Create an image from the text content
+            img = Image.new('RGB', (800, 600), color='white')
+            draw = ImageDraw.Draw(img)
+            
+            try:
+                # Try to use a default font that should be available
+                font = ImageFont.truetype("Arial.ttf", 16)
+            except IOError:
+                font = ImageFont.load_default()
+            
+            lines = text.split('\n')
+            y_offset = 10
+            for line in lines:
+                if y_offset > 580: # Stop if image is full
+                    break
+                draw.text((10, y_offset), line, fill='black', font=font)
+                y_offset += 20
+            
+            # Save with appropriate format
+            if output_path.lower().endswith('.jpg'):
+                img = img.convert('RGB')
+                img.save(output_path, 'JPEG', quality=95, optimize=True)
+            elif output_path.lower().endswith('.png'):
+                img.save(output_path, 'PNG', optimize=True)
+            else:
+                img.save(output_path)
+            
+            jobs[job_id]["progress"] = 100
+            jobs[job_id]["warning"] = "HTML to image conversion used Python-based text rendering fallback. Layout fidelity may vary. For best results, ensure wkhtmltoimage is installed and in your PATH."
+            logger.info("HTML to image: BeautifulSoup + PIL text rendering fallback successful")
+            return True
+        except Exception as e:
+            logger.warning(f"BeautifulSoup + PIL fallback failed: {e}")
+            jobs[job_id]["error"] = f"HTML to image conversion failed. Ensure wkhtmltoimage is installed and in your PATH. Fallback also failed: {e}"
             return False
 
+    async def _html_to_image_playwright(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
+        """Helper method to convert HTML to image using Playwright."""
+        from playwright.async_api import async_playwright
+        
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch()
+                page = await browser.new_page()
+                
+                # Set viewport size for consistent screenshots
+                await page.set_viewport_size({"width": 1200, "height": 800})
+                
+                # Navigate to the local HTML file
+                await page.goto(f"file://{os.path.abspath(input_path)}")
+                
+                # Wait for content to load (adjust as needed)
+                await page.wait_for_load_state('networkidle')
+                
+                # Take screenshot
+                await page.screenshot(path=output_path, full_page=True)
+                
+                await browser.close()
+                jobs[job_id]["progress"] = 100
+                jobs[job_id]["conversion_method"] = "playwright"
+                jobs[job_id]["warning"] = None
+                logger.info("HTML to image: Playwright conversion successful")
+                return True
+        except Exception as e:
+            logger.error(f"Playwright HTML to image conversion error: {e}")
+            jobs[job_id]["error"] = f"Playwright HTML to image conversion failed: {e}"
+            return False
+    
     def _html_to_epub(self, input_path: str, output_path: str, job_id: str, jobs: Dict) -> bool:
         try:
             import pypandoc

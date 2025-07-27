@@ -32,3 +32,4 @@ pypandoc==1.13
 pdfplumber==0.11.0
 fastapi-limiter==0.1.6
 redis==5.0.1
+imgkit==1.2.3
