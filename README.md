@@ -44,15 +44,18 @@ sudo apt update
 # Install system dependencies
 sudo apt install -y python3 python3-pip python3-venv
 sudo apt install -y libcairo2 libpango-1.0-0 libgdk-pixbuf2.0-0 libffi-dev
-sudo apt install -y poppler-utils ffmpeg wkhtmltopdf
+sudo apt install -y poppler-utils ffmpeg pandoc
 ```
 
 #### Windows
 ```bash
 # Install Python from https://python.org
 # Install FFmpeg from https://ffmpeg.org/download.html
-# Install wkhtmltopdf from https://wkhtmltopdf.org/downloads.html
+# Install Pandoc from https://pandoc.org/installing.html
 ```
+
+**Note on HTML to Image Conversion:**
+For optimal HTML to image conversion (e.g., DOCX to JPG), the API now primarily uses `Playwright` which automatically manages browser installations. If `Playwright` fails, it falls back to `wkhtmltoimage` (which is discontinued but might still be present on some systems) or a basic Python-based rendering. For best results, ensure `Playwright` browsers are installed via `playwright install` after installing Python dependencies.
 
 ## 🛠️ Installation
 
@@ -85,6 +88,9 @@ pip install --upgrade pip
 
 # Install all required packages
 pip install -r requirements.txt
+
+# Install Playwright browsers (Chromium, Firefox, WebKit)
+playwright install
 ```
 
 ### Step 4: Verify Installation
